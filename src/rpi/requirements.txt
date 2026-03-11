@@ -1,0 +1,5 @@
+pyrplidar==0.1.2
+pyserial==3.5
+
+numpy
+matplotlib
