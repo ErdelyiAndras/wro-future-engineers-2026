@@ -1,3 +1,5 @@
 from utils.Event import Event
 
-__all__ = ["Event"]
+Point = tuple[float, float]
+
+__all__ = ["Event", "Point"]
