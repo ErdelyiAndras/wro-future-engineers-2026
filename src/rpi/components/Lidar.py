@@ -29,8 +29,11 @@ class Lidar(Component):
         lidar = self._lidar
         self._lidar = None
         if lidar:
-            lidar.set_motor_pwm(0)
-            lidar.disconnect()
+            try:
+                lidar.set_motor_pwm(0)
+                lidar.disconnect()
+            except Exception:
+                pass
 
     def start(self) -> None:
         if self._is_running:
