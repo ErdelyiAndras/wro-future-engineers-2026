@@ -2,6 +2,8 @@ from components import Lidar, Ticker
 from control import EgoInformation, FieldMap, Direction
 from processors import LidarProcessor, SemanticClassifier
 
+from FieldMapVisualiser import FieldMapVisualizer
+
 import time
 
 def main():
@@ -15,6 +17,9 @@ def main():
 
     semantic_classifier = SemanticClassifier(field_map)
 
+    visualiser = FieldMapVisualizer(field_map, ego_information)
+    visualiser.start()
+
     with Lidar() as lidar, \
          Ticker(interval = 1.0) as classification_ticker:
 
@@ -24,7 +29,12 @@ def main():
         lidar.start()
         classification_ticker.start()
 
-        time.sleep(10)
+        end = time.time() + 60
+        while time.time() < end:
+            visualiser.update()
+            time.sleep(1 / 10)
+
+    visualiser.stop()
 
 if __name__ == '__main__':
     main()
