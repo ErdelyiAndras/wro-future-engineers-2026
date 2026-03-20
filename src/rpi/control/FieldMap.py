@@ -18,11 +18,11 @@ class CellLabel(IntEnum):
     PARKING_WALL   = auto()
 
 class FieldMap:
-    CELL_SIZE: int = 5    # mm
-    WIDTH:     int = 6000 # mm
-    HEIGHT:    int = 6000 # mm
-    ROWS:      int = HEIGHT // CELL_SIZE
-    COLS:      int = WIDTH  // CELL_SIZE
+    CELL_SIZE: float = 5.0    # mm
+    WIDTH:     float = 6000.0 # mm
+    HEIGHT:    float = 6000.0 # mm
+    ROWS:      int   = int(HEIGHT // CELL_SIZE)
+    COLS:      int   = int(WIDTH  // CELL_SIZE)
     ORIGIN:    tuple[int, int] = (3000, 3000) # mm, mm
 
     _L_OCC:  float =  0.85
@@ -33,8 +33,8 @@ class FieldMap:
     def __init__(self) -> None:
         self._lock:      Lock             = Lock()
         self._direction: Direction | None = None
-        self._occupancy: np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype=np.float32)
-        self._semantic:  np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype=np.uint8)
+        self._occupancy: np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype = np.float32)
+        self._semantic:  np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype = np.uint8)
 
     @property
     def direction(self) -> Direction | None:
@@ -51,20 +51,20 @@ class FieldMap:
         robot_pos:  np.ndarray,
         hit_points: np.ndarray,
     ) -> None:
-        robot_pos  = np.asarray(robot_pos, dtype=float)
+        robot_pos  = np.asarray(robot_pos, dtype = float)
         hit_points = np.atleast_2d(hit_points).astype(float)
 
         rows_hit, cols_hit = self._grid_idx_from_world_coordinates(hit_points)
         valid_hit          = self._valid_mask(rows_hit, cols_hit)
 
         diffs   = hit_points - robot_pos          # (N, 2)
-        lengths = np.linalg.norm(diffs, axis=1)   # (N,)
+        lengths = np.linalg.norm(diffs, axis = 1) # (N,)
 
         valid_rays         = lengths > self.CELL_SIZE
         diffs_v, lengths_v = diffs[valid_rays], lengths[valid_rays]
 
-        free_rows = np.empty(0, dtype=int)
-        free_cols = np.empty(0, dtype=int)
+        free_rows = np.empty(0, dtype = int)
+        free_cols = np.empty(0, dtype = int)
 
         if len(diffs_v) > 0:
             n_steps = int(np.ceil(lengths_v.max() / self.CELL_SIZE))
@@ -95,7 +95,7 @@ class FieldMap:
                 # unknown = (self._semantic[free_rows, free_cols] == CellLabel.UNKNOWN) | True
                 np.add.at(self._occupancy, (free_rows, free_cols), self._L_FREE)
 
-            np.clip(self._occupancy, self._L_MIN, self._L_MAX, out=self._occupancy)
+            np.clip(self._occupancy, self._L_MIN, self._L_MAX, out = self._occupancy)
 
     def set_label(self, coords: np.ndarray, label: CellLabel, occupancy_threshold: float = _L_MIN) -> None:
         coords     = np.atleast_2d(coords)
@@ -161,7 +161,5 @@ class FieldMap:
         rows: np.ndarray,
         cols: np.ndarray,
     ) -> np.ndarray:
-        return (
-            (0 <= rows) & (rows < FieldMap.ROWS) &
-            (0 <= cols) & (cols < FieldMap.COLS)
-        )
+        return (0 <= rows) & (rows < FieldMap.ROWS) & \
+               (0 <= cols) & (cols < FieldMap.COLS)

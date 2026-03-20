@@ -22,6 +22,6 @@ class Ticker(Component):
     def _run(self) -> None:
         self._stop_event.clear()
         while self._is_running:
-            self._stop_event.wait(timeout=self._interval)
+            self._stop_event.wait(timeout = self._interval)
             if self._is_running:
                 self.on_tick()

@@ -23,7 +23,7 @@ class Component(ABC):
         if self._is_running:
             return
         self._is_running = True
-        self._thread     = Thread(target=self._run, name=type(self).__name__, daemon=True)
+        self._thread     = Thread(target = self._run, name = type(self).__name__, daemon = True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -32,7 +32,7 @@ class Component(ABC):
         self._on_stop()
         self._is_running = False
         if self._thread:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout = 3)
             self._thread = None
 
     def _on_stop(self) -> None:
