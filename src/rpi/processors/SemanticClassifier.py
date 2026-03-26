@@ -8,13 +8,14 @@ from sklearn.cluster import DBSCAN
 
 from processors.Processor import Processor
 from control import FieldMap, CellLabel
+from utils import mm, degree
 
 @dataclass
 class LineSegment:
     endpoints:       np.ndarray  # (2, 2)
     inlier_points:   np.ndarray  # (N, 2)
     linearity_ratio: float = 0.0
-    rms_distance:    float = 0.0 # mm
+    rms_distance:    mm    = 0.0
     point_density:   float = 0.0 # points / mm
 
     @property
@@ -28,8 +29,8 @@ class LineSegment:
         return diff / norm if norm > 1e-10 else diff
 
     @property
-    def length(self) -> float:
-        return float(np.linalg.norm(self.endpoints[1] - self.endpoints[0]))
+    def length(self) -> mm:
+        return mm(np.linalg.norm(self.endpoints[1] - self.endpoints[0]))
 
 
 @dataclass
@@ -41,8 +42,8 @@ class PointCluster:
         return self.points.mean(axis = 0)
 
     @property
-    def bounding_box_extent(self) -> float:
-        return float(np.max(self.points.max(axis = 0) - self.points.min(axis = 0)))
+    def bounding_box_extent(self) -> mm:
+        return mm(np.max(self.points.max(axis = 0) - self.points.min(axis = 0)))
 
     @property
     def linearity_ratio(self) -> float:
@@ -55,37 +56,37 @@ class PointCluster:
 
 class SemanticClassifier(Processor):
     # DBSCAN
-    _DBSCAN_EPS:         float = 30.0 # mm
-    _DBSCAN_MIN_SAMPLES: int   = 5
+    _DBSCAN_EPS:         mm  = 30.0
+    _DBSCAN_MIN_SAMPLES: int = 5
 
     # RANSAC
-    _RANSAC_ITERATIONS:      int   = 50
-    _INLIER_THRESHOLD:       float = 10.0 # mm
-    _MAX_CONSECUTIVE_MISSES: int   = 4
+    _RANSAC_ITERATIONS:      int = 50
+    _INLIER_THRESHOLD:       mm  = 10.0
+    _MAX_CONSECUTIVE_MISSES: int = 4
 
     # Obstacle
-    _MAX_OBSTACLE_EXTENT:    float = 100.0 # mm
-    _MIN_OBSTACLE_POINTS:    int   = 5
+    _MAX_OBSTACLE_EXTENT: mm  = 100.0
+    _MIN_OBSTACLE_POINTS: int = 5
 
     # Segment quality
     _MIN_LINEARITY_RATIO: float = 0.92
-    _MAX_RMS_DISTANCE:    float = 8.0 # mm
+    _MAX_RMS_DISTANCE:    mm    = 8.0
 
     # Gap splitting
-    _MAX_GAP_LENGTH: float = 80.0 # mm
+    _MAX_GAP_LENGTH: mm = 80.0
 
     # Rejoin and wall classification
-    _MIN_SUBSEGMENT_LENGTH: float = 150.0 # mm
-    _MIN_WALL_LENGTH:       float = 600.0 # mm
-    _MAX_NUMBER_OF_WALLS:   int   = 8
+    _MIN_SUBSEGMENT_LENGTH: mm  = 150.0
+    _MIN_WALL_LENGTH:       mm  = 600.0
+    _MAX_NUMBER_OF_WALLS:   int = 8
 
     # Parking wall
-    _MIN_PARKING_WALL_LENGTH:     float = 80.0  # mm
-    _MAX_PARKING_WALL_LENGTH:     float = 260.0 # mm
-    _MAX_NUMBER_OF_PARKING_WALLS: int   = 2
-    _MAX_PARKING_PAIR_ANGLE:      float = 10.0  # degrees
-    _MIN_PARKING_PAIR_GAP:        float = 150.0 # mm
-    _MAX_PARKING_PAIR_GAP:        float = 600.0 # mm
+    _MIN_PARKING_WALL_LENGTH:     mm     = 80.0
+    _MAX_PARKING_WALL_LENGTH:     mm     = 260.0
+    _MAX_NUMBER_OF_PARKING_WALLS: int    = 2
+    _MAX_PARKING_PAIR_ANGLE:      degree = 10.0
+    _MIN_PARKING_PAIR_GAP:        mm     = 150.0
+    _MAX_PARKING_PAIR_GAP:        mm     = 600.0
 
     # Label propagation
     _PROPAGATION_CELLS: int = 2
@@ -229,7 +230,7 @@ class SemanticClassifier(Processor):
         parking_candidates: list[LineSegment]       = []
 
         for group in groups:
-            span = float(np.linalg.norm(
+            span = mm(np.linalg.norm(
                 group[-1].endpoints[1] - group[0].endpoints[0]
             ))
 
@@ -260,7 +261,7 @@ class SemanticClassifier(Processor):
                 if angle_deg > self._MAX_PARKING_PAIR_ANGLE:
                     continue
 
-                gap = float(np.linalg.norm(a.centroid - b.centroid))
+                gap = mm(np.linalg.norm(a.centroid - b.centroid))
                 if not (self._MIN_PARKING_PAIR_GAP <= gap <= self._MAX_PARKING_PAIR_GAP):
                     continue
 
@@ -346,7 +347,7 @@ class SemanticClassifier(Processor):
 
             endpoint1 = centroid + group_proj[ 0] * direction
             endpoint2 = centroid + group_proj[-1] * direction
-            length    = float(np.linalg.norm(endpoint2 - endpoint1))
+            length    = mm(np.linalg.norm(endpoint2 - endpoint1))
             if length == 0:
                 continue
 
@@ -355,7 +356,7 @@ class SemanticClassifier(Processor):
             linearity_ratio = float(s_sub[0] ** 2 / (s_sub[0] ** 2 + s_sub[1] ** 2 + 1e-10))
 
             distances     = np.abs((group_pts - centroid) @ normal)
-            rms_distance  = float(np.sqrt(np.mean(distances ** 2)))
+            rms_distance  = mm(np.sqrt(np.mean(distances ** 2)))
             point_density = len(group_pts) / length
 
             segments.append(LineSegment(
@@ -379,8 +380,8 @@ class SemanticClassifier(Processor):
 
     @staticmethod
     def _sample_segment(endpoints: np.ndarray) -> np.ndarray:
-        p1, p2 = endpoints[0].astype(float), endpoints[1].astype(float)
-        length = float(np.linalg.norm(p2 - p1))
+        p1, p2 = endpoints[0].astype(np.float64), endpoints[1].astype(np.float64)
+        length = mm(np.linalg.norm(p2 - p1))
         if length == 0:
             return p1[np.newaxis]
 

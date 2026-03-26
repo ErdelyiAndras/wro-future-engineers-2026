@@ -5,6 +5,8 @@ from threading import Lock
 
 import numpy as np
 
+from utils import mm, Point
+
 class Direction(Enum):
     CW  = "clockwise"
     CCW = "counter clockwise"
@@ -18,12 +20,12 @@ class CellLabel(IntEnum):
     PARKING_WALL   = auto()
 
 class FieldMap:
-    CELL_SIZE: float = 5.0    # mm
-    WIDTH:     float = 6000.0 # mm
-    HEIGHT:    float = 6000.0 # mm
+    CELL_SIZE: mm    = 5.0
+    WIDTH:     mm    = 6000.0
+    HEIGHT:    mm    = 6000.0
     ROWS:      int   = int(HEIGHT // CELL_SIZE)
     COLS:      int   = int(WIDTH  // CELL_SIZE)
-    ORIGIN:    tuple[int, int] = (3000, 3000) # mm, mm
+    ORIGIN:    Point = (3000.0, 3000.0)
 
     _L_OCC:  float =  0.85
     _L_FREE: float = -0.40
@@ -48,16 +50,16 @@ class FieldMap:
 
     def update_occupancy(
         self,
-        robot_pos:  np.ndarray,
+        ego_pos:    np.ndarray,
         hit_points: np.ndarray,
     ) -> None:
-        robot_pos  = np.asarray(robot_pos, dtype = float)
-        hit_points = np.atleast_2d(hit_points).astype(float)
+        ego_pos    = np.asarray(ego_pos, dtype = np.float64)
+        hit_points = np.atleast_2d(hit_points).astype(np.float64)
 
         rows_hit, cols_hit = self._grid_idx_from_world_coordinates(hit_points)
         valid_hit          = self._valid_mask(rows_hit, cols_hit)
 
-        diffs   = hit_points - robot_pos          # (N, 2)
+        diffs   = hit_points - ego_pos            # (N, 2)
         lengths = np.linalg.norm(diffs, axis = 1) # (N,)
 
         valid_rays         = lengths > self.CELL_SIZE
@@ -75,10 +77,9 @@ class FieldMap:
                 sample_lengths = t[np.newaxis, :] * lengths_v[:, np.newaxis]   # (N, n_steps)
                 before_hit     = sample_lengths < (lengths_v[:, np.newaxis] - self.CELL_SIZE * 0.5)
 
-                sample_points = (
-                    robot_pos[np.newaxis, np.newaxis, :]
-                    + t[np.newaxis, :, np.newaxis] * diffs_v[:, np.newaxis, :]
-                )  # (N, n_steps, 2)
+                sample_points = ego_pos[np.newaxis, np.newaxis, :] + \
+                                t[np.newaxis, :, np.newaxis] * \
+                                diffs_v[:, np.newaxis, :] # (N, n_steps, 2)
 
                 flat_points = sample_points[before_hit]  # (M, 2)
 

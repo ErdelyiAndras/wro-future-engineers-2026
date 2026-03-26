@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from control import CellLabel, FieldMap, EgoInformation
-
+from utils import radian
 
 class FieldMapVisualizer:
     """
@@ -409,7 +409,7 @@ src.onmessage = e => {{
         pts = f"{col},{row-s} {col+s},{row} {col},{row+s} {col-s},{row}"
         return f'<polygon points="{pts}" fill="{self._ORIGIN_COLOR}"/>'
 
-    def _ego_svg(self, pos_mm: np.ndarray, yaw: float) -> str:
+    def _ego_svg(self, pos_mm: np.ndarray, yaw: radian) -> str:
         rows, cols = FieldMap._grid_idx_from_world_coordinates(pos_mm[np.newaxis])
         col = int(cols[0])
         row = FieldMap.ROWS - 1 - int(rows[0])
