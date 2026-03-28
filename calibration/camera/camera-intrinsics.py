@@ -4,11 +4,12 @@ import argparse
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
-parser.add_argument("image_dir",    type=str,   help="Directory containing calibration images")
-parser.add_argument("output_dir",   type=str,   help="Directory to save intrinsics and distortion files")
-parser.add_argument("--square_size",type=float, default=24.5, help="Checkerboard square size in mm")
-parser.add_argument("--cols",       type=int,   default=9,    help="Number of inner corners per row")
-parser.add_argument("--rows",       type=int,   default=6,    help="Number of inner corners per column")
+parser.add_argument("image_dir",     type=str,   help="Directory containing calibration images")
+parser.add_argument("output_dir",    type=str,   help="Directory to save intrinsics and distortion files")
+parser.add_argument("--square_size", type=float, default=24.5, help="Checkerboard square size in mm")
+parser.add_argument("--cols",        type=int,   default=9,    help="Number of inner corners per row")
+parser.add_argument("--rows",        type=int,   default=6,    help="Number of inner corners per column")
+parser.add_argument("--headless",    action="store_true", help="Skip saving corner-detection previews")
 args = parser.parse_args()
 
 image_dir  = Path(args.image_dir)
@@ -20,12 +21,12 @@ if not images:
     print(f"No images found in {image_dir}")
     exit(1)
 
-objp          = np.zeros((args.rows * args.cols, 3), np.float32)
-objp[:, :2]   = np.mgrid[0:args.cols, 0:args.rows].T.reshape(-1, 2) * args.square_size
-obj_points    = []
-img_points    = []
-gray          = None
-failed        = []
+objp        = np.zeros((args.rows * args.cols, 3), np.float32)
+objp[:, :2] = np.mgrid[0:args.cols, 0:args.rows].T.reshape(-1, 2) * args.square_size
+obj_points  = []
+img_points  = []
+gray        = None
+failed      = []
 
 for path in images:
     img  = cv2.imread(str(path))
@@ -34,18 +35,24 @@ for path in images:
     ret, corners = cv2.findChessboardCorners(gray, (args.cols, args.rows), None)
     if not ret:
         failed.append(path.name)
+        print(f"FAILED  {path.name}")
         continue
 
     corners = cv2.cornerSubPix(
         gray, corners, (11, 11), (-1, -1),
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
     )
     obj_points.append(objp)
     img_points.append(corners)
     print(f"OK      {path.name}")
 
-for name in failed:
-    print(f"FAILED  {name}")
+    if not args.headless:
+        preview = img.copy()
+        cv2.drawChessboardCorners(preview, (args.cols, args.rows), corners, ret)
+        preview_path = output_dir / "previews" / path.name
+        preview_path.parent.mkdir(exist_ok=True)
+        cv2.imwrite(str(preview_path), preview)
+        print(f"        → preview saved: {preview_path}")
 
 print(f"\n{len(obj_points)}/{len(images)} images used")
 
@@ -61,11 +68,12 @@ fx, fy = K[0, 0], K[1, 1]
 cx, cy = K[0, 2], K[1, 2]
 
 print(f"\nReprojection error : {ret:.4f} px  (good if < 0.5)")
-print(f"\nfx = {fx:.2f}")
-print(f"fy = {fy:.2f}")
-print(f"cx = {cx:.2f}")
-print(f"cy = {cy:.2f}")
-print(f"\nDistortion coefficients: {dist.ravel()}")
+print(f"\nfx = {fx},")
+print(f"fy = {fy},")
+print(f"cx = {cx},")
+print(f"cy = {cy},")
+d = dist.ravel()
+print(f"\nDistortion coefficients: np.array({d.tolist()}, dtype=np.float64)")
 print(f"\nFull intrinsic matrix:\n{K}")
 
 intrinsics_path = output_dir / "camera_intrinsics.npy"

@@ -3,8 +3,11 @@ import numpy as np
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("image", type=str, help="Path to the image")
-parser.add_argument("--tolerance", type=int, default=10, help="HSV range tolerance margin")
+parser.add_argument("image",        type=str, help="Path to the image")
+parser.add_argument("--tolerance",  type=int, default=10, help="HSV range tolerance margin")
+parser.add_argument("--headless",   action="store_true", help="No GUI: provide ROIs via --red-roi and --green-roi")
+parser.add_argument("--red-roi",    type=str, default=None, metavar="X,Y,W,H", help="ROI for red obstacle (headless mode)")
+parser.add_argument("--green-roi",  type=str, default=None, metavar="X,Y,W,H", help="ROI for green obstacle (headless mode)")
 args = parser.parse_args()
 
 img = cv2.imread(args.image)
@@ -14,16 +17,30 @@ if img is None:
 
 hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-def select_region(label: str) -> np.ndarray | None:
+def parse_roi(s: str) -> tuple[int, int, int, int]:
+    try:
+        x, y, w, h = map(int, s.split(","))
+        return x, y, w, h
+    except ValueError:
+        print(f"Invalid ROI format '{s}' — expected X,Y,W,H")
+        exit(1)
+
+def select_region_gui(label: str) -> np.ndarray | None:
     print(f"\nSelect the {label} obstacle — draw a rectangle, press ENTER or SPACE to confirm, C to cancel")
     roi = cv2.selectROI(f"Select {label}", img, fromCenter=False, showCrosshair=True)
     cv2.destroyWindow(f"Select {label}")
-
     x, y, w, h = roi
     if w == 0 or h == 0:
         print(f"No region selected for {label}")
         return None
+    return hsv[y:y+h, x:x+w].reshape(-1, 3)
 
+def select_region_headless(label: str, roi_str: str | None) -> np.ndarray | None:
+    if roi_str is None:
+        print(f"--{label}-roi not provided, skipping {label}")
+        return None
+    x, y, w, h = parse_roi(roi_str)
+    print(f"{label}: using ROI x={x} y={y} w={w} h={h}")
     return hsv[y:y+h, x:x+w].reshape(-1, 3)
 
 def compute_range(pixels: np.ndarray, tolerance: int) -> tuple:
@@ -34,7 +51,7 @@ def compute_range(pixels: np.ndarray, tolerance: int) -> tuple:
     # Detect red hue wrap-around (hue values on both sides of 0/180)
     if h_vals.max() - h_vals.min() > 90:
         # Wrap: shift values above 90 down by 180 for range computation
-        h_shifted         = h_vals.copy().astype(int)
+        h_shifted = h_vals.copy().astype(int)
         h_shifted[h_shifted > 90] -= 180
 
         h_center = int(np.mean(h_shifted))
@@ -81,21 +98,31 @@ def print_ranges(label: str, ranges: tuple) -> None:
     print(f"\n--- {label} ---")
     if len(ranges) == 2:
         (l1, u1), (l2, u2) = ranges
-        print(f"_{label.upper()}_LOWER_1 = np.array([{l1[0]:3d}, {l1[1]:3d}, {l1[2]:3d}], dtype=np.uint8)")
-        print(f"_{label.upper()}_UPPER_1 = np.array([{u1[0]:3d}, {u1[1]:3d}, {u1[2]:3d}], dtype=np.uint8)")
-        print(f"_{label.upper()}_LOWER_2 = np.array([{l2[0]:3d}, {l2[1]:3d}, {l2[2]:3d}], dtype=np.uint8)")
-        print(f"_{label.upper()}_UPPER_2 = np.array([{u2[0]:3d}, {u2[1]:3d}, {u2[2]:3d}], dtype=np.uint8)")
+        print(f"{label}_lower_1 = np.array([{l1[0]}, {l1[1]}, {l1[2]}], dtype=np.uint8),")
+        print(f"{label}_upper_1 = np.array([{u1[0]}, {u1[1]}, {u1[2]}], dtype=np.uint8),")
+        print(f"{label}_lower_2 = np.array([{l2[0]}, {l2[1]}, {l2[2]}], dtype=np.uint8),")
+        print(f"{label}_upper_2 = np.array([{u2[0]}, {u2[1]}, {u2[2]}], dtype=np.uint8),")
     else:
         (l, u), = ranges
-        print(f"_{label.upper()}_LOWER = np.array([{l[0]:3d}, {l[1]:3d}, {l[2]:3d}], dtype=np.uint8)")
-        print(f"_{label.upper()}_UPPER = np.array([{u[0]:3d}, {u[1]:3d}, {u[2]:3d}], dtype=np.uint8)")
+        print(f"{label}_lower = np.array([{l[0]}, {l[1]}, {l[2]}], dtype=np.uint8),")
+        print(f"{label}_upper = np.array([{u[0]}, {u[1]}, {u[2]}], dtype=np.uint8),")
+
+roi_args = {"red": args.red_roi, "green": args.green_roi}
 
 for label in ("red", "green"):
-    pixels = select_region(label)
+    if args.headless:
+        pixels = select_region_headless(label, roi_args[label])
+    else:
+        pixels = select_region_gui(label)
+
     if pixels is None:
         continue
+
     ranges = compute_range(pixels, args.tolerance)
-    preview_mask(label, ranges)
+
+    if not args.headless:
+        preview_mask(label, ranges)
+
     print_ranges(label, ranges)
 
 print("\nDone — paste the ranges above into CameraProcessor")
