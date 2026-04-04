@@ -15,15 +15,16 @@ class LidarProcessor(Processor):
         self,
         field_map:          FieldMap,
         ego_information:    EgoInformation,
-        lidar_offset_angle: degree = 0.0,
-        lidar_mount_offset: Point  = (0.0, 0.0),
+        *,
+        offset_angle: degree,
+        mount_offset: Point,
     ) -> None:
         super().__init__()
 
-        self._field_map:          FieldMap       = field_map
-        self._ego_information:    EgoInformation = ego_information
-        self._lidar_offset_angle: radian         = math.radians(lidar_offset_angle)
-        self._lidar_mount_offset: Point          = lidar_mount_offset
+        self._field_map:       FieldMap       = field_map
+        self._ego_information: EgoInformation = ego_information
+        self._offset_angle:    radian         = math.radians(offset_angle)
+        self._mount_offset:    Point          = mount_offset
 
         self._current_scan: list[Point]   = []
         self._prev_angle:   radian | None = None
@@ -53,10 +54,10 @@ class LidarProcessor(Processor):
         cos_yaw = math.cos(yaw)
 
         scan      = np.array(self._current_scan)
-        angles    = scan[:, 0] + self._lidar_offset_angle
+        angles    = scan[:, 0] + self._offset_angle
         distances = scan[:, 1]
 
-        mount_x, mount_y = self._lidar_mount_offset
+        mount_x, mount_y = self._mount_offset
         x_ego = distances * np.sin(angles) + mount_x
         y_ego = distances * np.cos(angles) + mount_y
 

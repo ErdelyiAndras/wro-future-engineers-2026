@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 import numpy as np
 
-from control import CellLabel, FieldMap, EgoInformation
+from control import CellLabel, FieldMap, EgoInformation, Obstacle, ObstacleColor
 from utils import radian
 
 class FieldMapVisualizer:
@@ -54,20 +54,35 @@ class FieldMapVisualizer:
     _OCCUPIED_UNKNOWN: str = "#999999"  # occupied but not yet classified
 
     _LABEL_COLORS: dict[int, str] = {
-        int(CellLabel.WALL):           "#000000",
-        int(CellLabel.OBSTACLE):       "#ffd700",  # gold  — color not yet known
-        int(CellLabel.OBSTACLE_RED):   "#e01e1e",
-        int(CellLabel.OBSTACLE_GREEN): "#1ec81e",
-        int(CellLabel.PARKING_WALL):   "#c850c8",  # magenta
+        int(CellLabel.WALL):         "#000000",
+        int(CellLabel.OBSTACLE):     "#ffd700",  # gold — color not yet known
+        int(CellLabel.PARKING_WALL): "#c850c8",  # magenta
     }
+
+    _OBSTACLE_COLOR_RGB: dict[ObstacleColor, tuple[int, int, int]] = {
+        ObstacleColor.RED:   (224,  30,  30),
+        ObstacleColor.GREEN: ( 30, 200,  30),
+    }
+
+    # Palette for cluster view — one colour per cluster ID (wraps around).
+    _CLUSTER_PALETTE: list[tuple[int, int, int]] = [
+        (230,  25,  75),  # red
+        ( 60, 180,  75),  # green
+        (255, 225,  25),  # yellow
+        ( 67,  99, 216),  # blue
+        (245, 130,  49),  # orange
+        (145,  30, 180),  # purple
+        ( 66, 212, 244),  # cyan
+        (240,  50, 230),  # magenta
+    ]
 
     _ORIGIN_COLOR: str = "#00a5ff"  # orange
     _EGO_COLOR:    str = "#00ffff"  # cyan
     _TEXT_COLOR:   str = "#333333"
 
-    _ARROW_LEN:   int = 60    # SVG units = grid cells = 300 mm
-    _CROSS_R:     int = 5     # robot circle radius
-    _ORIGIN_SIZE: int = 8     # diamond half-size
+    _ARROW_LEN:   int = 30    # SVG units = grid cells = 300 mm
+    _CROSS_R:     int = 2     # robot circle radius
+    _ORIGIN_SIZE: int = 3     # diamond half-size
 
     def __init__(
         self,
@@ -137,6 +152,7 @@ class FieldMapVisualizer:
   <button id="btn-c" onclick="setView('c')" class="active">Combined</button>
   <button id="btn-o" onclick="setView('o')">Occupancy</button>
   <button id="btn-s" onclick="setView('s')">Semantic</button>
+  <button id="btn-k" onclick="setView('k')">Clusters</button>
 </div>
 <svg id="map" viewBox="0 0 {cols} {rows}"
      xmlns="http://www.w3.org/2000/svg"
@@ -237,13 +253,22 @@ src.onmessage = e => {{
 
         self._server                = ThreadingHTTPServer(('0.0.0.0', self._port), _Handler)
         self._server.daemon_threads = True  # handler threads die with the main thread
-        thread = threading.Thread(
+        threading.Thread(
             target=self._server.serve_forever,
             daemon=True,
             name='FieldMapVisualizer-HTTP',
-        )
-        thread.start()
+        ).start()
+        threading.Thread(
+            target=self._update_loop,
+            daemon=True,
+            name='FieldMapVisualizer-Update',
+        ).start()
         print(f"FieldMapVisualizer: http://localhost:{self._port}")
+
+    def _update_loop(self) -> None:
+        while True:
+            self.update()
+            time.sleep(1 / 10)
 
     def stop(self) -> None:
         if self._server is not None:
@@ -270,15 +295,16 @@ src.onmessage = e => {{
     # ------------------------------------------------------------------ #
 
     def update(self) -> None:
-        """Render all three views and push to connected browsers as JSON."""
-        occupancy, semantic = self._grid_snapshot()
-        position, yaw       = self._ego_information.get_ego_information()
+        """Render all views and push to connected browsers as JSON."""
+        occupancy, semantic, obstacles = self._grid_snapshot()
+        position, yaw                  = self._ego_information.get_ego_information()
 
-        combined = self._render_combined_svg(occupancy, semantic, position, yaw)
-        occ_svg  = self._render_occupancy_svg(occupancy, position, yaw)
-        sem_svg  = self._render_semantic_svg(semantic, position, yaw)
+        combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw)
+        occ_svg     = self._render_occupancy_svg(occupancy, position, yaw)
+        sem_svg     = self._render_semantic_svg(semantic, obstacles, position, yaw)
+        cluster_svg = self._render_cluster_svg(obstacles, position, yaw)
 
-        payload = json.dumps({"c": combined, "o": occ_svg, "s": sem_svg})
+        payload = json.dumps({"c": combined, "o": occ_svg, "s": sem_svg, "k": cluster_svg})
         with self._frame_lock:
             self._frame = payload
 
@@ -290,6 +316,7 @@ src.onmessage = e => {{
         self,
         occupancy: np.ndarray,
         semantic:  np.ndarray,
+        obstacles: list[Obstacle],
         position,
         yaw,
     ) -> str:
@@ -301,9 +328,15 @@ src.onmessage = e => {{
         unknown_mask = (semantic == int(CellLabel.UNKNOWN)) & (occupancy > 0.0)
         img_rgb[unknown_mask] = self._hex_to_rgb(self._OCCUPIED_UNKNOWN)
 
-        # Semantic labeled cells on top
+        # Semantic labeled cells on top — only where occupancy evidence exists
         for label_int, hex_color in self._LABEL_COLORS.items():
-            img_rgb[semantic == label_int] = self._hex_to_rgb(hex_color)
+            img_rgb[(semantic == label_int) & (occupancy > 0.0)] = self._hex_to_rgb(hex_color)
+
+        # Obstacle color overlay
+        for obs in obstacles:
+            if obs.color is not None and obs.cells:
+                cell_arr = np.array(list(obs.cells), dtype=int)
+                img_rgb[cell_arr[:, 0], cell_arr[:, 1]] = self._OBSTACLE_COLOR_RGB[obs.color]
 
         img_bgr = cv2.cvtColor(np.flipud(img_rgb), cv2.COLOR_RGB2BGR)
         _, buf  = cv2.imencode('.png', img_bgr)
@@ -364,7 +397,8 @@ src.onmessage = e => {{
 
     def _render_semantic_svg(
         self,
-        semantic: np.ndarray,
+        semantic:  np.ndarray,
+        obstacles: list[Obstacle],
         position,
         yaw,
     ) -> str:
@@ -377,6 +411,45 @@ src.onmessage = e => {{
         img_rgb = np.full((rows, cols, 3), 255, dtype=np.uint8)
         for label_int, hex_color in self._LABEL_COLORS.items():
             img_rgb[semantic == label_int] = self._hex_to_rgb(hex_color)
+
+        # Obstacle color overlay
+        for obs in obstacles:
+            if obs.color is not None and obs.cells:
+                cell_arr = np.array(list(obs.cells), dtype=int)
+                img_rgb[cell_arr[:, 0], cell_arr[:, 1]] = self._OBSTACLE_COLOR_RGB[obs.color]
+
+        img_bgr = cv2.cvtColor(np.flipud(img_rgb), cv2.COLOR_RGB2BGR)
+        _, buf  = cv2.imencode('.png', img_bgr)
+        b64     = base64.b64encode(buf.tobytes()).decode('ascii')
+
+        parts = [
+            f'<rect width="{cols}" height="{rows}" fill="{self._BACKGROUND}"/>',
+            f'<image x="0" y="0" width="{cols}" height="{rows}" '
+            f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
+            self._origin_svg(),
+        ]
+        if position is not None and yaw is not None:
+            parts.append(self._ego_svg(np.array(position, dtype=float), yaw))
+        return ''.join(parts)
+
+    # ------------------------------------------------------------------ #
+    #  SVG generation — cluster view                                       #
+    # ------------------------------------------------------------------ #
+
+    def _render_cluster_svg(
+        self,
+        obstacles: list[Obstacle],
+        position,
+        yaw,
+    ) -> str:
+        rows, cols = FieldMap.ROWS, FieldMap.COLS
+        palette    = self._CLUSTER_PALETTE
+
+        img_rgb = np.full((rows, cols, 3), 255, dtype=np.uint8)
+        for idx, obs in enumerate(obstacles):
+            if obs.cells:
+                cell_arr = np.array(list(obs.cells), dtype=int)
+                img_rgb[cell_arr[:, 0], cell_arr[:, 1]] = palette[idx % len(palette)]
 
         img_bgr = cv2.cvtColor(np.flipud(img_rgb), cv2.COLOR_RGB2BGR)
         _, buf  = cv2.imencode('.png', img_bgr)
@@ -423,7 +496,7 @@ src.onmessage = e => {{
 
         arrow = (
             f'<line x1="{col}" y1="{row}" x2="{x2:.1f}" y2="{y2:.1f}" '
-            f'stroke="{self._EGO_COLOR}" stroke-width="3" '
+            f'stroke="{self._EGO_COLOR}" stroke-width="1" '
             f'marker-end="url(#ah)"/>'
         )
         circle = (
@@ -449,9 +522,10 @@ src.onmessage = e => {{
     #  Grid snapshot                                                       #
     # ------------------------------------------------------------------ #
 
-    def _grid_snapshot(self) -> tuple[np.ndarray, np.ndarray]:
+    def _grid_snapshot(self) -> tuple[np.ndarray, np.ndarray, list[Obstacle]]:
         with self._field_map._lock:
             return (
                 self._field_map._occupancy.copy(),
                 self._field_map._semantic.copy(),
+                [obs.copy() for obs in self._field_map._obstacles],
             )

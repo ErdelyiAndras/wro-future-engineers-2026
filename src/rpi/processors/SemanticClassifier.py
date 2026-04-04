@@ -107,8 +107,7 @@ class SemanticClassifier(Processor):
 
         obstacle_clusters, wall_points = self._classify_clusters(clusters)
 
-        for cluster in obstacle_clusters:
-            self._field_map.set_label(cluster.points, CellLabel.OBSTACLE)
+        self._field_map.update_obstacles([c.points for c in obstacle_clusters])
 
         if len(wall_points) < 2:
             self._propagate_labels()
@@ -281,7 +280,7 @@ class SemanticClassifier(Processor):
         unknown_occupied = (semantic == int(CellLabel.UNKNOWN)) & (occupancy > 0.0)
         updates: dict[CellLabel, np.ndarray] = {}
 
-        for label in (CellLabel.WALL, CellLabel.PARKING_WALL, CellLabel.OBSTACLE):
+        for label in (CellLabel.WALL, CellLabel.PARKING_WALL):
             label_mask = semantic == int(label)
             if not label_mask.any():
                 continue

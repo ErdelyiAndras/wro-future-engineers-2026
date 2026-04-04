@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum, IntEnum, auto
 from threading import Lock
 
@@ -7,17 +8,52 @@ import numpy as np
 
 from utils import mm, Point
 
+class ObstacleColor(Enum):
+    RED   = "red"
+    GREEN = "green"
+
+@dataclass
+class Obstacle:
+    cells:                  set[tuple[int, int]]
+    red_votes:              int = 0
+    green_votes:            int = 0
+    observation_count:      int = 0
+    frames_since_last_seen: int = 0
+
+    @property
+    def centroid(self) -> np.ndarray:
+        cell_arr = np.array(list(self.cells), dtype = np.float64)  # (N, 2): (row, col)
+        x = (cell_arr[:, 1] * FieldMap.CELL_SIZE - FieldMap.ORIGIN[0]).mean()
+        y = (cell_arr[:, 0] * FieldMap.CELL_SIZE - FieldMap.ORIGIN[1]).mean()
+        return np.array([x, y])
+
+    @property
+    def color(self) -> ObstacleColor | None:
+        t = FieldMap._COLOR_THRESHOLD
+        if self.red_votes >= t and self.red_votes > self.green_votes:
+            return ObstacleColor.RED
+        if self.green_votes >= t and self.green_votes > self.red_votes:
+            return ObstacleColor.GREEN
+        return None
+
+    def copy(self) -> Obstacle:
+        return Obstacle(
+            cells                  = set(self.cells),
+            red_votes              = self.red_votes,
+            green_votes            = self.green_votes,
+            observation_count      = self.observation_count,
+            frames_since_last_seen = self.frames_since_last_seen,
+        )
+
 class Direction(Enum):
     CW  = "clockwise"
     CCW = "counter clockwise"
 
 class CellLabel(IntEnum):
-    UNKNOWN        = 0
-    WALL           = auto()
-    OBSTACLE       = auto()
-    OBSTACLE_RED   = auto()
-    OBSTACLE_GREEN = auto()
-    PARKING_WALL   = auto()
+    UNKNOWN      = 0
+    WALL         = auto()
+    OBSTACLE     = auto()
+    PARKING_WALL = auto()
 
 class FieldMap:
     CELL_SIZE: mm    = 5.0
@@ -32,11 +68,16 @@ class FieldMap:
     _L_MIN:  float = -2.0
     _L_MAX:  float =  3.5
 
+    _MATCH_RADIUS:    mm  = 80.0
+    _STALE_FRAMES:    int = 5
+    _COLOR_THRESHOLD: int = 10
+
     def __init__(self) -> None:
         self._lock:      Lock             = Lock()
         self._direction: Direction | None = None
         self._occupancy: np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype = np.float32)
         self._semantic:  np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype = np.uint8)
+        self._obstacles: list[Obstacle]   = []
 
     @property
     def direction(self) -> Direction | None:
@@ -98,7 +139,75 @@ class FieldMap:
 
             np.clip(self._occupancy, self._L_MIN, self._L_MAX, out = self._occupancy)
 
-    def set_label(self, coords: np.ndarray, label: CellLabel, occupancy_threshold: float = _L_MIN) -> None:
+    def update_obstacles(self, clusters: list[np.ndarray]) -> None:
+        with self._lock:
+            for obs in self._obstacles:
+                obs.frames_since_last_seen += 1
+
+            for points in clusters:
+                points           = np.atleast_2d(points).astype(np.float64)
+                cluster_centroid = points.mean(axis = 0)
+
+                best_obs  = None
+                best_dist = float(self._MATCH_RADIUS)
+                for obs in self._obstacles:
+                    d = float(np.linalg.norm(obs.centroid - cluster_centroid))
+                    if d < best_dist:
+                        best_dist = d
+                        best_obs  = obs
+
+                rows, cols = self._grid_idx_from_world_coordinates(points)
+                valid      = self._valid_mask(rows, cols)
+                new_cells  = set(zip(rows[valid].tolist(), cols[valid].tolist()))
+
+                if best_obs is not None:
+                    best_obs.cells                  |= new_cells
+                    best_obs.observation_count      += 1
+                    best_obs.frames_since_last_seen  = 0
+                else:
+                    self._obstacles.append(Obstacle(
+                        cells                  = new_cells,
+                        observation_count      = 1,
+                        frames_since_last_seen = 0,
+                    ))
+
+            self._obstacles = [
+                obs for obs in self._obstacles
+                if obs.frames_since_last_seen < self._STALE_FRAMES
+            ]
+
+            self._semantic[self._semantic == int(CellLabel.OBSTACLE)] = int(CellLabel.UNKNOWN)
+            for obs in self._obstacles:
+                if obs.cells:
+                    cell_arr = np.array(list(obs.cells), dtype = int)
+                    self._semantic[cell_arr[:, 0], cell_arr[:, 1]] = int(CellLabel.OBSTACLE)
+
+    def vote_obstacle_color(
+        self,
+        obstacle: Obstacle,
+        color:    ObstacleColor,
+    ) -> None:
+        with self._lock:
+            for obs in self._obstacles:
+                if obs.cells & obstacle.cells:
+                    if color == ObstacleColor.RED:
+                        obs.red_votes  += 1
+                        obs.green_votes = max(0, obs.green_votes - 1)
+                    else:
+                        obs.green_votes += 1
+                        obs.red_votes   = max(0, obs.red_votes - 1)
+                    break
+
+    def get_obstacles(self) -> list[Obstacle]:
+        with self._lock:
+            return [obs.copy() for obs in self._obstacles]
+
+    def set_label(
+        self,
+        coords:              np.ndarray,
+        label:               CellLabel,
+        occupancy_threshold: float = _L_MIN,
+    ) -> None:
         coords     = np.atleast_2d(coords)
         rows, cols = self._grid_idx_from_world_coordinates(coords)
         valid      = self._valid_mask(rows, cols)
