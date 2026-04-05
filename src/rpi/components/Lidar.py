@@ -13,9 +13,10 @@ class Lidar(Component):
         self._port:     str = port
         self._baudrate: int = baudrate
         self._timeout:  int = timeout
-        self._lidar: PyRPlidar | None = PyRPlidar()
+        self._lidar:    PyRPlidar | None = None
 
     def _setup(self) -> None:
+        self._lidar = PyRPlidar()
         self._lidar.connect(port = self._port, baudrate = self._baudrate, timeout = self._timeout)
         time.sleep(2)
         self._lidar.set_motor_pwm(200)

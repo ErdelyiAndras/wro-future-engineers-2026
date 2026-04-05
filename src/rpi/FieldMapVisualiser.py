@@ -523,9 +523,4 @@ src.onmessage = e => {{
     # ------------------------------------------------------------------ #
 
     def _grid_snapshot(self) -> tuple[np.ndarray, np.ndarray, list[Obstacle]]:
-        with self._field_map._lock:
-            return (
-                self._field_map._occupancy.copy(),
-                self._field_map._semantic.copy(),
-                [obs.copy() for obs in self._field_map._obstacles],
-            )
+        return self._field_map.snapshot()

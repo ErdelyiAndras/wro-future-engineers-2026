@@ -273,9 +273,7 @@ class SemanticClassifier(Processor):
         return best_pair
 
     def _propagate_labels(self) -> None:
-        with self._field_map._lock:
-            semantic  = self._field_map._semantic.copy()
-            occupancy = self._field_map._occupancy.copy()
+        occupancy, semantic, _ = self._field_map.snapshot()
 
         unknown_occupied = (semantic == int(CellLabel.UNKNOWN)) & (occupancy > 0.0)
         updates: dict[CellLabel, np.ndarray] = {}
@@ -296,9 +294,7 @@ class SemanticClassifier(Processor):
         if not updates:
             return
 
-        with self._field_map._lock:
-            for label, mask in updates.items():
-                self._field_map._semantic[mask] = int(label)
+        self._field_map.apply_semantic_updates(updates)
 
     def _ransac_line(self, points: np.ndarray) -> np.ndarray:
         n         = len(points)

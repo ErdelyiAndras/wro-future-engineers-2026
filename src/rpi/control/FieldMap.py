@@ -231,6 +231,17 @@ class FieldMap:
         coords = self._world_from_grid_idx(rows, cols)
         return coords, labels
 
+    def snapshot(self) -> tuple[np.ndarray, np.ndarray, list[Obstacle]]:
+        with self._lock:
+            return self._occupancy.copy(), \
+                   self._semantic.copy(), \
+                   [obs.copy() for obs in self._obstacles]
+
+    def apply_semantic_updates(self, updates: dict[CellLabel, np.ndarray]) -> None:
+        with self._lock:
+            for label, mask in updates.items():
+                self._semantic[mask] = int(label)
+
     def get_cells(
         self,
         coords: np.ndarray,

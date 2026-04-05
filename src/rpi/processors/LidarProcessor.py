@@ -29,7 +29,7 @@ class LidarProcessor(Processor):
         self._current_scan: list[Point]   = []
         self._prev_angle:   radian | None = None
 
-    def _process(self, angle: degree, distance: mm, quality: int) -> None:
+    def _process(self, angle: radian, distance: mm, quality: int) -> None:
         if self._prev_angle is not None and \
            angle < self._prev_angle - math.radians(self._SCAN_WRAP_THRESHOLD):
             self._process_scan()

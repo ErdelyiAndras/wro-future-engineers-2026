@@ -98,14 +98,14 @@ def print_ranges(label: str, ranges: tuple) -> None:
     print(f"\n--- {label} ---")
     if len(ranges) == 2:
         (l1, u1), (l2, u2) = ranges
-        print(f"{label}_lower_1 = np.array([{l1[0]}, {l1[1]}, {l1[2]}], dtype = np.uint8),")
-        print(f"{label}_upper_1 = np.array([{u1[0]}, {u1[1]}, {u1[2]}], dtype = np.uint8),")
-        print(f"{label}_lower_2 = np.array([{l2[0]}, {l2[1]}, {l2[2]}], dtype = np.uint8),")
-        print(f"{label}_upper_2 = np.array([{u2[0]}, {u2[1]}, {u2[2]}], dtype = np.uint8),")
+        print(f"{label}_lower_1 = np.array([{l1[0]:>3}, {l1[1]:>3}, {l1[2]:>3}], dtype = np.uint8),")
+        print(f"{label}_upper_1 = np.array([{u1[0]:>3}, {u1[1]:>3}, {u1[2]:>3}], dtype = np.uint8),")
+        print(f"{label}_lower_2 = np.array([{l2[0]:>3}, {l2[1]:>3}, {l2[2]:>3}], dtype = np.uint8),")
+        print(f"{label}_upper_2 = np.array([{u2[0]:>3}, {u2[1]:>3}, {u2[2]:>3}], dtype = np.uint8),")
     else:
         (l, u), = ranges
-        print(f"{label}_lower = np.array([{l[0]}, {l[1]}, {l[2]}], dtype = np.uint8),")
-        print(f"{label}_upper = np.array([{u[0]}, {u[1]}, {u[2]}], dtype = np.uint8),")
+        print(f"{label}_lower = np.array([{l[0]:>3}, {l[1]:>3}, {l[2]:>3}], dtype = np.uint8),")
+        print(f"{label}_upper = np.array([{u[0]:>3}, {u[1]:>3}, {u[2]:>3}], dtype = np.uint8),")
 
 roi_args = {"red": args.red_roi, "green": args.green_roi}
 
