@@ -87,7 +87,7 @@ def main():
          Camera() as camera, \
          Ticker(interval = 0.1) as classification_ticker:
 
-        lidar.on_point                += lidar_processor
+        lidar.on_scan                 += lidar_processor
         camera.on_frame               += camera_processor
         classification_ticker.on_tick += semantic_classifier
 

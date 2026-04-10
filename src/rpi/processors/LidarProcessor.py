@@ -9,8 +9,6 @@ from control import FieldMap, EgoInformation
 from utils import Point, degree, radian, mm
 
 class LidarProcessor(Processor):
-    _SCAN_WRAP_THRESHOLD: degree = 5.0
-
     def __init__(
         self,
         field_map:          FieldMap,
@@ -26,17 +24,11 @@ class LidarProcessor(Processor):
         self._offset_angle:    radian         = math.radians(offset_angle)
         self._mount_offset:    Point          = mount_offset
 
-        self._current_scan: list[Point]   = []
-        self._prev_angle:   radian | None = None
+        self._current_scan: list[tuple[radian, mm]] = []
 
-    def _process(self, angle: radian, distance: mm, quality: int) -> None:
-        if self._prev_angle is not None and \
-           angle < self._prev_angle - math.radians(self._SCAN_WRAP_THRESHOLD):
-            self._process_scan()
-            self._current_scan = []
-
-        self._current_scan.append((angle, distance))
-        self._prev_angle = angle
+    def _process(self, scan: list[tuple[radian, mm, int]]) -> None:
+        self._current_scan = [(angle, distance) for angle, distance, _ in scan]
+        self._process_scan()
 
     def _process_scan(self) -> None:
         ego_position, yaw = self._ego_information.get_ego_information()
