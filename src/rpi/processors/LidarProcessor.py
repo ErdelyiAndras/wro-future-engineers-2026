@@ -30,7 +30,9 @@ class LidarProcessor(Processor):
         self._current_scan = [(angle, distance) for angle, distance, _ in scan]
         self._process_scan()
 
-    def _process_scan(self) -> None:
+    def _process(self, scan: np.ndarray) -> None:
+        scan = scan[:, :2]
+
         ego_position, yaw = self._ego_information.get_ego_information()
         if ego_position is None or yaw is None:
             return
@@ -40,12 +42,11 @@ class LidarProcessor(Processor):
 
         self._field_map.update_occupancy(ego_position, points)
 
-    def _to_world_coordinates(self, ego_position: Point, yaw: radian) -> np.ndarray:
+    def _to_world_coordinates(self, scan: np.ndarray, ego_position: Point, yaw: radian) -> np.ndarray:
         ego_pos_x, ego_pos_y = ego_position
         sin_yaw = math.sin(yaw)
         cos_yaw = math.cos(yaw)
 
-        scan      = np.array(self._current_scan)
         angles    = scan[:, 0] + self._offset_angle
         distances = scan[:, 1]
 

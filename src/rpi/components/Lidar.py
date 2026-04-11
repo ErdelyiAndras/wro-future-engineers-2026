@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import time
 
+import numpy as np
+
 from adafruit_rplidar import RPLidar, RPLidarException, SCAN_TYPE_NORMAL, SCAN_TYPE_EXPRESS
 
 from components.Component import Component
@@ -95,7 +97,7 @@ class Lidar(Component):
                     break
 
                 if new_scan and self._buffer:
-                    self.on_scan(self._buffer)
+                    self.on_scan(np.array(self._buffer, dtype = np.float64))
                     self._buffer = []
 
                 if quality == 0 or distance <= 0:
