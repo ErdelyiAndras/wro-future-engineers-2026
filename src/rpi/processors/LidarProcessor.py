@@ -5,10 +5,14 @@ import math
 import numpy as np
 
 from processors.Processor import Processor
+from processors.LidarPoseEstimator import LidarPoseEstimator
 from control import FieldMap, EgoInformation
 from utils import Point, degree, radian, mm
 
 class LidarProcessor(Processor):
+    _MIN_TRANSLATION_CHANGE: mm     = 3.0
+    _MIN_ROTATION_CHANGE:    radian = math.radians(0.5)
+
     def __init__(
         self,
         field_map:          FieldMap,
@@ -24,21 +28,38 @@ class LidarProcessor(Processor):
         self._offset_angle:    radian         = math.radians(offset_angle)
         self._mount_offset:    Point          = mount_offset
 
-        self._current_scan: list[tuple[radian, mm]] = []
-
-    def _process(self, scan: list[tuple[radian, mm, int]]) -> None:
-        self._current_scan = [(angle, distance) for angle, distance, _ in scan]
-        self._process_scan()
+        self._pose_estimator: LidarPoseEstimator = LidarPoseEstimator(
+            field_map,
+            self._offset_angle,
+            self._mount_offset,
+        )
 
     def _process(self, scan: np.ndarray) -> None:
         scan = scan[:, :2]
 
-        ego_position, yaw = self._ego_information.get_ego_information()
-        if ego_position is None or yaw is None:
+        prior_pos, prior_yaw = self._ego_information.get_ego_information()
+        if prior_pos is None or prior_yaw is None:
             return
 
-        ego_position = np.array(ego_position, dtype = np.float64)
-        points       = self._to_world_coordinates(ego_position, yaw)
+        ego_position = np.array(prior_pos, dtype = np.float64)
+        yaw          = prior_yaw
+        points       = self._to_world_coordinates(scan, ego_position, yaw)
+
+        estimate = self._pose_estimator.estimate(scan, prior_pos, prior_yaw)
+        estimate = None
+
+        if estimate is not None:
+            estimated_pos, estimated_yaw = estimate
+            epx, epy = estimated_pos
+            ppx, ppy = prior_pos
+            translation = math.hypot(epx - ppx, epy - ppy)
+            rotation    = abs((estimated_yaw - prior_yaw + math.pi) % (2 * math.pi) - math.pi)
+
+            if translation >= self._MIN_TRANSLATION_CHANGE or rotation >= self._MIN_ROTATION_CHANGE:
+                self._ego_information.update_lidar(estimated_pos[0], estimated_pos[1], estimated_yaw)
+                ego_position = np.array(estimated_pos, dtype = np.float64)
+                yaw          = estimated_yaw
+                points       = self._to_world_coordinates(scan, ego_position, yaw)
 
         self._field_map.update_occupancy(ego_position, points)
 
