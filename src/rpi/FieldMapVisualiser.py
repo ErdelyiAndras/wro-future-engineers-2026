@@ -78,6 +78,7 @@ class FieldMapVisualizer:
 
     _ORIGIN_COLOR: str = "#00a5ff"  # orange
     _EGO_COLOR:    str = "#00ffff"  # cyan
+    _TARGET_COLOR: str = "#ff6600"  # orange — pure-pursuit lookahead point
     _TEXT_COLOR:   str = "#333333"
 
     _ARROW_LEN:   int = 30    # SVG units = grid cells = 300 mm
@@ -102,6 +103,9 @@ class FieldMapVisualizer:
         self._ever_connected:  bool           = False
         self._last_disconnect: float | None   = None
         self._count_lock:      threading.Lock = threading.Lock()
+
+        self._target:      tuple[float, float] | None = None
+        self._target_lock: threading.Lock             = threading.Lock()
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -291,6 +295,21 @@ src.onmessage = e => {{
             return time.time() - self._last_disconnect > 2.0
 
     # ------------------------------------------------------------------ #
+    #  Target subscription                                                 #
+    # ------------------------------------------------------------------ #
+
+    def set_target(self, forward_mm: float, lateral_mm: float, speed: float) -> None:
+        pos, yaw = self._ego_information.get_ego_information()
+        if pos is None or yaw is None:
+            with self._target_lock:
+                self._target = None
+            return
+        dx = forward_mm * math.cos(yaw) - lateral_mm * math.sin(yaw)
+        dy = forward_mm * math.sin(yaw) + lateral_mm * math.cos(yaw)
+        with self._target_lock:
+            self._target = (pos[0] + dx, pos[1] + dy)
+
+    # ------------------------------------------------------------------ #
     #  Frame update                                                        #
     # ------------------------------------------------------------------ #
 
@@ -298,11 +317,13 @@ src.onmessage = e => {{
         """Render all views and push to connected browsers as JSON."""
         occupancy, semantic, obstacles = self._grid_snapshot()
         position, yaw                  = self._ego_information.get_ego_information()
+        with self._target_lock:
+            target = self._target
 
-        combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw)
-        occ_svg     = self._render_occupancy_svg(occupancy, position, yaw)
-        sem_svg     = self._render_semantic_svg(semantic, obstacles, position, yaw)
-        cluster_svg = self._render_cluster_svg(obstacles, position, yaw)
+        combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw, target)
+        occ_svg     = self._render_occupancy_svg(occupancy, position, yaw, target)
+        sem_svg     = self._render_semantic_svg(semantic, obstacles, position, yaw, target)
+        cluster_svg = self._render_cluster_svg(obstacles, position, yaw, target)
 
         payload = json.dumps({"c": combined, "o": occ_svg, "s": sem_svg, "k": cluster_svg})
         with self._frame_lock:
@@ -319,6 +340,7 @@ src.onmessage = e => {{
         obstacles: list[Obstacle],
         position,
         yaw,
+        target,
     ) -> str:
         rows, cols = FieldMap.ROWS, FieldMap.COLS
 
@@ -348,6 +370,8 @@ src.onmessage = e => {{
             f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
             self._origin_svg(),
         ]
+        if target is not None:
+            parts.append(self._target_svg(target))
         if position is not None and yaw is not None:
             parts.append(self._ego_svg(np.array(position, dtype=float), yaw))
         return ''.join(parts)
@@ -361,6 +385,7 @@ src.onmessage = e => {{
         occupancy: np.ndarray,
         position,
         yaw,
+        target,
     ) -> str:
         """
         Grayscale log-odds heatmap as an embedded PNG with pixelated scaling.
@@ -371,12 +396,12 @@ src.onmessage = e => {{
             occupied   (log-odds > 0)  → dark gray / black, approaching 0
         """
         rows, cols = FieldMap.ROWS, FieldMap.COLS
-        lo_range   = FieldMap._L_MAX - FieldMap._L_MIN
+        lo_range   = FieldMap.L_MAX - FieldMap.L_MIN
 
         img          = np.full((rows, cols), 255, dtype=np.uint8)
         observed     = occupancy != 0.0
-        vals         = np.clip(occupancy[observed], FieldMap._L_MIN, FieldMap._L_MAX)
-        img[observed] = ((1.0 - (vals - FieldMap._L_MIN) / lo_range) * 220).astype(np.uint8)
+        vals         = np.clip(occupancy[observed], FieldMap.L_MIN, FieldMap.L_MAX)
+        img[observed] = ((1.0 - (vals - FieldMap.L_MIN) / lo_range) * 220).astype(np.uint8)
 
         _, buf = cv2.imencode('.png', np.flipud(img))
         b64    = base64.b64encode(buf.tobytes()).decode('ascii')
@@ -387,6 +412,8 @@ src.onmessage = e => {{
             f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
             self._origin_svg(),
         ]
+        if target is not None:
+            parts.append(self._target_svg(target))
         if position is not None and yaw is not None:
             parts.append(self._ego_svg(np.array(position, dtype=float), yaw))
         return ''.join(parts)
@@ -401,6 +428,7 @@ src.onmessage = e => {{
         obstacles: list[Obstacle],
         position,
         yaw,
+        target,
     ) -> str:
         """
         Colour-coded semantic label map as an embedded PNG with pixelated scaling.
@@ -428,6 +456,8 @@ src.onmessage = e => {{
             f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
             self._origin_svg(),
         ]
+        if target is not None:
+            parts.append(self._target_svg(target))
         if position is not None and yaw is not None:
             parts.append(self._ego_svg(np.array(position, dtype=float), yaw))
         return ''.join(parts)
@@ -441,6 +471,7 @@ src.onmessage = e => {{
         obstacles: list[Obstacle],
         position,
         yaw,
+        target,
     ) -> str:
         rows, cols = FieldMap.ROWS, FieldMap.COLS
         palette    = self._CLUSTER_PALETTE
@@ -461,6 +492,8 @@ src.onmessage = e => {{
             f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
             self._origin_svg(),
         ]
+        if target is not None:
+            parts.append(self._target_svg(target))
         if position is not None and yaw is not None:
             parts.append(self._ego_svg(np.array(position, dtype=float), yaw))
         return ''.join(parts)
@@ -481,6 +514,22 @@ src.onmessage = e => {{
         s   = self._ORIGIN_SIZE
         pts = f"{col},{row-s} {col+s},{row} {col},{row+s} {col-s},{row}"
         return f'<polygon points="{pts}" fill="{self._ORIGIN_COLOR}"/>'
+
+    def _target_svg(self, pos_mm: tuple[float, float]) -> str:
+        arr = np.array([pos_mm], dtype=float)
+        rows_idx, cols_idx = FieldMap._grid_idx_from_world_coordinates(arr)
+        col = int(cols_idx[0])
+        row = FieldMap.ROWS - 1 - int(rows_idx[0])
+
+        if not FieldMap._valid_mask(np.array([row]), np.array([col]))[0]:
+            return ''
+
+        r = self._CROSS_R + 2
+        c = self._TARGET_COLOR
+        circle = f'<circle cx="{col}" cy="{row}" r="{r}" fill="none" stroke="{c}" stroke-width="1"/>'
+        hline  = f'<line x1="{col-r}" y1="{row}" x2="{col+r}" y2="{row}" stroke="{c}" stroke-width="1"/>'
+        vline  = f'<line x1="{col}" y1="{row-r}" x2="{col}" y2="{row+r}" stroke="{c}" stroke-width="1"/>'
+        return circle + hline + vline
 
     def _ego_svg(self, pos_mm: np.ndarray, yaw: radian) -> str:
         rows, cols = FieldMap._grid_idx_from_world_coordinates(pos_mm[np.newaxis])

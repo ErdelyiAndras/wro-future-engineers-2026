@@ -5,6 +5,7 @@ from processors.CameraProcessor import (
     ObstacleColorRanges
 )
 from processors.LidarProcessor import LidarProcessor
+from processors.PathPlanningProcessor import PathPlanningProcessor
 from processors.SemanticClassifier import SemanticClassifier
 
 __all__ = [
@@ -13,5 +14,6 @@ __all__ = [
     'CameraIntrinsics',
     'ObstacleColorRanges',
     'LidarProcessor',
+    'PathPlanningProcessor',
     'SemanticClassifier'
 ]
