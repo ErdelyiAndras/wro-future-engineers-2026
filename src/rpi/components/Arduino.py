@@ -14,7 +14,7 @@ class Arduino(Component):
     _MSG_STATE      = 0x02
     _MSG_STOP       = 0x03
 
-    def __init__(self, port: str = '/dev/ttyUSB1', baud_rate: int = 115200) -> None:
+    def __init__(self, port: str = '/dev/arduino', baud_rate: int = 115200) -> None:
         super().__init__()
         self._port:       str                  = port
         self._baud_rate:  int                  = baud_rate
@@ -61,7 +61,7 @@ class Arduino(Component):
 
             msg_id = buf[1]
             length = buf[2]
-            total  = 4 + length()
+            total  = 4 + length
 
             if len(buf) < total:
                 break

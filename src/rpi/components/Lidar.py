@@ -16,7 +16,7 @@ class Lidar(Component):
 
     def __init__(
         self,
-        port:     str = "/dev/ttyUSB0",
+        port:     str = "/dev/lidar",
         baudrate: int = 115200,
         timeout:  int = 3
     ) -> None:
