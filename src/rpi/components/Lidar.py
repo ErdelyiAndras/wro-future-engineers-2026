@@ -82,31 +82,35 @@ class Lidar(Component):
             pass
 
     def _run(self) -> None:
-        self._flush_serial()
+        while self._is_running:
+            self._flush_serial()
+            try:
+                iterator = self._lidar.iter_measurements(
+                    max_buf_meas = self.MAX_BUF_MEAS,
+                    scan_type    = SCAN_TYPE_NORMAL
+                )
 
-        try:
-            iterator = self._lidar.iter_measurements(
-                max_buf_meas = self.MAX_BUF_MEAS,
-                scan_type    = SCAN_TYPE_NORMAL
-            )
+                self._lidar.set_pwm(self.MOTOR_PWM)
 
-            self._lidar.set_pwm(self.MOTOR_PWM)
+                for new_scan, quality, angle, distance in iterator:
+                    if not self._is_running:
+                        break
 
-            for new_scan, quality, angle, distance in iterator:
+                    if new_scan and self._buffer:
+                        self.on_scan(np.array(self._buffer, dtype = np.float64))
+                        self._buffer = []
+
+                    if quality == 0 or distance <= 0:
+                        continue
+
+                    self._buffer.append((math.radians(angle), distance, quality))
+            except RPLidarException as e:
                 if not self._is_running:
-                    break
-
-                if new_scan and self._buffer:
-                    self.on_scan(np.array(self._buffer, dtype = np.float64))
-                    self._buffer = []
-
-                if quality == 0 or distance <= 0:
-                    continue
-
-                self._buffer.append((math.radians(angle), distance, quality))
-
-        except OSError:
-            pass
-        except RPLidarException:
-            if self._is_running:
-                raise
+                    return
+                print(f"RPLidarException: {e}")
+                self._flush_serial()
+                time.sleep(0.5)
+            except OSError:
+                pass
+            except (Exception, BaseException) as e:
+                print(f"Unexpected error in Lidar: {e}")
