@@ -38,7 +38,7 @@ class LidarProcessor(Processor):
             return
 
         ego_position = np.array(ego_position, dtype = np.float64)
-        points       = self._to_world_coordinates(ego_position, yaw)
+        points       = self._to_world_coordinates(scan, ego_position, yaw)
 
         self._field_map.update_occupancy(ego_position, points)
 

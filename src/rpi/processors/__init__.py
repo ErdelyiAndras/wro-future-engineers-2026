@@ -1,3 +1,4 @@
+from processors.ArduinoProcessor import ArduinoProcessor
 from processors.CameraProcessor import (
     CameraProcessor,
     CameraExtrinsics,
@@ -9,6 +10,7 @@ from processors.PathPlanningProcessor import PathPlanningProcessor
 from processors.SemanticClassifier import SemanticClassifier
 
 __all__ = [
+    'ArduinoProcessor',
     'CameraProcessor',
     'CameraExtrinsics',
     'CameraIntrinsics',
