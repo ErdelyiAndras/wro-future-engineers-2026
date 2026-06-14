@@ -516,7 +516,7 @@ src.onmessage = e => {{
         return f'<polygon points="{pts}" fill="{self._ORIGIN_COLOR}"/>'
 
     def _target_svg(self, pos_mm: tuple[float, float]) -> str:
-        arr = np.array([pos_mm], dtype=float)
+        arr = np.array([[pos_mm[1], pos_mm[0]]], dtype=float)
         rows_idx, cols_idx = FieldMap._grid_idx_from_world_coordinates(arr)
         col = int(cols_idx[0])
         row = FieldMap.ROWS - 1 - int(rows_idx[0])
@@ -532,7 +532,7 @@ src.onmessage = e => {{
         return circle + hline + vline
 
     def _ego_svg(self, pos_mm: np.ndarray, yaw: radian) -> str:
-        rows, cols = FieldMap._grid_idx_from_world_coordinates(pos_mm[np.newaxis])
+        rows, cols = FieldMap._grid_idx_from_world_coordinates(pos_mm[[1, 0]][np.newaxis])
         col = int(cols[0])
         row = FieldMap.ROWS - 1 - int(rows[0])
 
@@ -555,8 +555,8 @@ src.onmessage = e => {{
 
         yaw_deg = math.degrees(yaw)
         lines   = [
-            f'x: {pos_mm[0]:+.0f} mm',
-            f'y: {pos_mm[1]:+.0f} mm',
+            f'x: {pos_mm[1]:+.0f} mm',
+            f'y: {pos_mm[0]:+.0f} mm',
             f'yaw: {yaw_deg:+.1f}°',
         ]
         text = ''.join(

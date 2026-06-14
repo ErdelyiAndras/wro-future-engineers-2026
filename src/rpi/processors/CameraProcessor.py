@@ -145,7 +145,7 @@ class CameraProcessor(Processor):
             [ sin_yaw,  cos_yaw],
         ])
 
-        d_xy     = world_points - ego_pos[:2]
+        d_xy     = world_points - ego_pos[[1, 0]]
         P_ego_xy = (R_w2e @ d_xy.T).T
 
         N     = len(world_points)

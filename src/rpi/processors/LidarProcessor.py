@@ -40,7 +40,7 @@ class LidarProcessor(Processor):
         ego_position = np.array(ego_position, dtype = np.float64)
         points       = self._to_world_coordinates(scan, ego_position, yaw)
 
-        self._field_map.update_occupancy(ego_position, points)
+        self._field_map.update_occupancy(ego_position[[1, 0]], points)
 
     def _to_world_coordinates(self, scan: np.ndarray, ego_position: Point, yaw: radian) -> np.ndarray:
         ego_pos_x, ego_pos_y = ego_position
@@ -54,7 +54,7 @@ class LidarProcessor(Processor):
         x_ego = distances * np.sin(angles) + mount_x
         y_ego = distances * np.cos(angles) + mount_y
 
-        x_world =  x_ego * cos_yaw + y_ego * sin_yaw + ego_pos_x
-        y_world = -x_ego * sin_yaw + y_ego * cos_yaw + ego_pos_y
+        x_world =  x_ego * cos_yaw + y_ego * sin_yaw + ego_pos_y
+        y_world = -x_ego * sin_yaw + y_ego * cos_yaw + ego_pos_x
 
         return np.column_stack((x_world, y_world))

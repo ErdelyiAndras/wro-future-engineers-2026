@@ -17,18 +17,18 @@ class PathPlanningProcessor(Processor):
     _K:                   int    = 10
     _OCCUPANCY_THRESHOLD: float  = 0.0
     _ROBOT_RADIUS:        mm     = 150.0
-    _HALF_ANGLE:          radian = math.radians(60.0)
-    _N_RAYS:              int    = 13
-    _L_MIN:               mm     = 500.0
-    _L_MAX:               mm     = 1000.0
+    _HALF_ANGLE:          radian = math.radians(80.0)
+    _N_RAYS:              int    = 17
+    _L_MIN:               mm     = 100.0
+    _L_MAX:               mm     = 500.0
     _W_DIST:              float  = 1.0
-    _W_CLEAR:             float  = 0.5
-    _K_ADAPTIVE:          float  = 3.0
+    _W_CLEAR:             float  = 1.5
+    _K_ADAPTIVE:          float  = 10.0
     _TARGET_CLEARANCE:    mm     = 150.0
-    _CLEARANCE_WEIGHT:    float  = 2.0
-    _WRONG_SIDE_PENALTY:  float  = 50.0
+    _CLEARANCE_WEIGHT:    float  = 1.2
+    _WRONG_SIDE_PENALTY:  float  = 500.0
     _L_LOOKAHEAD:         mm     = 350.0
-    _SPEED:               float  = 400.0
+    _SPEED:               float  = 150.0
 
     def __init__(
         self,
@@ -148,8 +148,8 @@ class PathPlanningProcessor(Processor):
 
             d = L_min_c
             while d <= L_max_c:
-                r = int(current_cell[0] + dy * d)
-                c = int(current_cell[1] + dx * d)
+                r = int(current_cell[0] + dx * d)
+                c = int(current_cell[1] + dy * d)
                 if not (0 <= r < rows and 0 <= c < cols):
                     break
                 if not traversable[r, c]:
@@ -248,7 +248,7 @@ class PathPlanningProcessor(Processor):
                 continue
 
             centroid_cell = PathPlanningProcessor._world_to_coarse(
-                (float(obs.centroid[0]), float(obs.centroid[1]))
+                (float(obs.centroid[1]), float(obs.centroid[0]))
             )
             vx = centroid_cell[1] - current_cell[1]
             vy = centroid_cell[0] - current_cell[0]
@@ -257,7 +257,7 @@ class PathPlanningProcessor(Processor):
             if dist == 0:
                 continue
 
-            dot   = (hx * vx + hy * vy) / dist
+            dot   = (hy * vx + hx * vy) / dist
             angle = math.acos(max(-1.0, min(1.0, dot)))
 
             if angle <= PathPlanningProcessor._HALF_ANGLE and dist < best_dist:
@@ -281,7 +281,7 @@ class PathPlanningProcessor(Processor):
             return penalties
 
         centroid_cell = PathPlanningProcessor._world_to_coarse(
-            (float(next_obstacle.centroid[0]), float(next_obstacle.centroid[1]))
+            (float(next_obstacle.centroid[1]), float(next_obstacle.centroid[0]))
         )
         cr, cc = centroid_cell
 
@@ -289,7 +289,7 @@ class PathPlanningProcessor(Processor):
         r_idx = np.arange(rows)
         CC, RR = np.meshgrid(c_idx, r_idx)
 
-        cross = hx * (RR - cr) - hy * (CC - cc)
+        cross = hy * (RR - cr) - hx * (CC - cc)
 
         if next_obstacle.color == ObstacleColor.RED:
             penalties[cross > 0] += PathPlanningProcessor._WRONG_SIDE_PENALTY
@@ -343,17 +343,17 @@ class PathPlanningProcessor(Processor):
     @staticmethod
     def _world_to_coarse(pos: tuple[float, float]) -> Cell:
         K   = PathPlanningProcessor._K
-        col = int((pos[0] + FieldMap.ORIGIN[0]) / (FieldMap.CELL_SIZE * K))
-        row = int((pos[1] + FieldMap.ORIGIN[1]) / (FieldMap.CELL_SIZE * K))
+        col = int((pos[1] + FieldMap.ORIGIN[0]) / (FieldMap.CELL_SIZE * K))
+        row = int((pos[0] + FieldMap.ORIGIN[1]) / (FieldMap.CELL_SIZE * K))
         return (row, col)
 
     @staticmethod
     def _coarse_to_world(cell: Cell) -> tuple[float, float]:
         K      = PathPlanningProcessor._K
         offset = (K * FieldMap.CELL_SIZE) / 2.0
-        x      = cell[1] * K * FieldMap.CELL_SIZE - FieldMap.ORIGIN[0] + offset
-        y      = cell[0] * K * FieldMap.CELL_SIZE - FieldMap.ORIGIN[1] + offset
-        return (x, y)
+        north  = cell[0] * K * FieldMap.CELL_SIZE - FieldMap.ORIGIN[1] + offset
+        east   = cell[1] * K * FieldMap.CELL_SIZE - FieldMap.ORIGIN[0] + offset
+        return (north, east)
 
     @staticmethod
     def _in_bounds(cell: Cell, grid: np.ndarray) -> bool:

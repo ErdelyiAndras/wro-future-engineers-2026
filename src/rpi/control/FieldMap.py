@@ -65,8 +65,8 @@ class FieldMap:
 
     _L_OCC:  float =  0.85
     _L_FREE: float = -0.40
-    _L_MIN:  float = -2.0
-    _L_MAX:  float =  3.5
+    L_MIN:   float = -2.0
+    L_MAX:   float =  3.5
 
     _MATCH_RADIUS:    mm  = 80.0
     _STALE_FRAMES:    int = 5
@@ -137,7 +137,7 @@ class FieldMap:
                 # unknown = (self._semantic[free_rows, free_cols] == CellLabel.UNKNOWN) | True
                 np.add.at(self._occupancy, (free_rows, free_cols), self._L_FREE)
 
-            np.clip(self._occupancy, self._L_MIN, self._L_MAX, out = self._occupancy)
+            np.clip(self._occupancy, self.L_MIN, self.L_MAX, out = self._occupancy)
 
     def update_obstacles(self, clusters: list[np.ndarray]) -> None:
         with self._lock:
@@ -206,7 +206,7 @@ class FieldMap:
         self,
         coords:              np.ndarray,
         label:               CellLabel,
-        occupancy_threshold: float = _L_MIN,
+        occupancy_threshold: float = L_MIN,
     ) -> None:
         coords     = np.atleast_2d(coords)
         rows, cols = self._grid_idx_from_world_coordinates(coords)
@@ -214,7 +214,7 @@ class FieldMap:
         r, c       = rows[valid], cols[valid]
 
         with self._lock:
-            if occupancy_threshold > self._L_MIN:
+            if occupancy_threshold > self.L_MIN:
                 occupied = self._occupancy[r, c] > occupancy_threshold
                 r, c     = r[occupied], c[occupied]
 
