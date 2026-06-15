@@ -21,13 +21,14 @@ class PathPlanningProcessor(Processor):
     _N_RAYS:              int    = 17
     _L_MIN:               mm     = 100.0
     _L_MAX:               mm     = 500.0
-    _W_DIST:              float  = 1.0
-    _W_CLEAR:             float  = 1.5
+    _W_DIST:              float  = 2.0
+    _W_CLEAR:             float  = 0.5
     _K_ADAPTIVE:          float  = 10.0
-    _TARGET_CLEARANCE:    mm     = 150.0
+    _TARGET_CLEARANCE:    mm     = 100.0
     _CLEARANCE_WEIGHT:    float  = 1.2
-    _WRONG_SIDE_PENALTY:  float  = 500.0
-    _L_LOOKAHEAD:         mm     = 350.0
+    _WRONG_SIDE_PENALTY:  float  = 150.0
+    _BACKWARD_PENALTY:    float  = 150.0
+    _L_LOOKAHEAD:         mm     = 450.0
     _SPEED:               float  = 150.0
 
     def __init__(
@@ -38,7 +39,8 @@ class PathPlanningProcessor(Processor):
         super().__init__()
         self._field_map       = field_map
         self._ego_information = ego_information
-        self.on_target: Event = Event()
+        self.on_target:        Event = Event()
+        self.on_next_obstacle: Event = Event()
 
         self._cached_blocked:     np.ndarray | None = None
         self._cached_traversable: np.ndarray | None = None
@@ -49,7 +51,8 @@ class PathPlanningProcessor(Processor):
         if pos is None or yaw is None:
             return
 
-        pose = self._plan(pos, yaw)
+        pose, next_obstacle = self._plan(pos, yaw)
+        self.on_next_obstacle(next_obstacle)
         if pose is None:
             return
 
@@ -61,26 +64,27 @@ class PathPlanningProcessor(Processor):
 
         self.on_target(forward_mm, lateral_mm, PathPlanningProcessor._SPEED)
 
-    def _plan(self, pos: Point, yaw: radian) -> Point | None:
+    def _plan(self, pos: Point, yaw: radian) -> tuple[Point | None, Obstacle | None]:
         occupancy, semantic, obstacles = self._field_map.snapshot()
 
         traversable, D_mm = self._prepare_grid(occupancy, semantic)
         current_cell      = self._world_to_coarse(pos)
 
         if not self._in_bounds(current_cell, traversable):
-            return None
+            return None, None
 
         goal_cell = self._select_goal(traversable, D_mm, current_cell, yaw)
         if goal_cell is None:
-            return None
+            return None, None
 
-        path = self._astar(traversable, D_mm, obstacles, current_cell, goal_cell, yaw)
+        upcoming = self._find_upcoming_obstacle(obstacles, current_cell, yaw)
+        path = self._astar(traversable, D_mm, upcoming, current_cell, goal_cell, yaw)
         if path is None:
-            return None
+            return None, upcoming
 
         thinned = self._thin_path(path, traversable)
         gx, gy  = self._lookahead_point(thinned)
-        return gx, gy
+        return (gx, gy), upcoming
 
     def _prepare_grid(
         self,
@@ -176,15 +180,16 @@ class PathPlanningProcessor(Processor):
     def _astar(
         traversable:   np.ndarray,
         D_mm:          np.ndarray,
-        obstacles:     list[Obstacle],
+        upcoming:      Obstacle | None,
         start:         Cell,
         goal:          Cell,
         robot_heading: radian,
     ) -> list[Cell] | None:
         SQRT2 = math.sqrt(2)
+        hx    = math.cos(robot_heading)
+        hy    = math.sin(robot_heading)
 
-        upcoming = PathPlanningProcessor._find_upcoming_obstacle(obstacles, start, robot_heading)
-        dir_pen  = PathPlanningProcessor._direction_penalties(D_mm, upcoming, robot_heading)
+        dir_pen = PathPlanningProcessor._direction_penalties(D_mm, upcoming, robot_heading)
 
         rows, cols = traversable.shape
         g_score:   dict[Cell, float] = {start: 0.0}
@@ -217,10 +222,12 @@ class PathPlanningProcessor(Processor):
                 if not traversable[nr, nc]:
                     continue
 
-                D_n    = float(D_mm[nr, nc])
-                cl_pen = max(0.0, PathPlanningProcessor._TARGET_CLEARANCE - D_n) / \
-                         PathPlanningProcessor._TARGET_CLEARANCE * PathPlanningProcessor._CLEARANCE_WEIGHT
-                new_g  = g + move_cost + cl_pen + float(dir_pen[nr, nc])
+                D_n      = float(D_mm[nr, nc])
+                cl_pen   = max(0.0, PathPlanningProcessor._TARGET_CLEARANCE - D_n) / \
+                           PathPlanningProcessor._TARGET_CLEARANCE * PathPlanningProcessor._CLEARANCE_WEIGHT
+                back_pen = PathPlanningProcessor._BACKWARD_PENALTY * \
+                           max(0.0, -(dr * hx + dc * hy) / move_cost)
+                new_g    = g + move_cost + cl_pen + float(dir_pen[nr, nc]) + back_pen
 
                 neighbour = (nr, nc)
                 if new_g < g_score.get(neighbour, math.inf):

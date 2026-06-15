@@ -76,10 +76,11 @@ class FieldMapVisualizer:
         (240,  50, 230),  # magenta
     ]
 
-    _ORIGIN_COLOR: str = "#00a5ff"  # orange
-    _EGO_COLOR:    str = "#00ffff"  # cyan
-    _TARGET_COLOR: str = "#ff6600"  # orange — pure-pursuit lookahead point
-    _TEXT_COLOR:   str = "#333333"
+    _ORIGIN_COLOR:        str = "#00a5ff"  # orange
+    _EGO_COLOR:           str = "#00ffff"  # cyan
+    _TARGET_COLOR:        str = "#ff6600"  # orange — pure-pursuit lookahead point
+    _NEXT_OBSTACLE_COLOR: str = "#ffffff"  # white ring — next obstacle path planner targets
+    _TEXT_COLOR:          str = "#333333"
 
     _ARROW_LEN:   int = 30    # SVG units = grid cells = 300 mm
     _CROSS_R:     int = 2     # robot circle radius
@@ -106,6 +107,9 @@ class FieldMapVisualizer:
 
         self._target:      tuple[float, float] | None = None
         self._target_lock: threading.Lock             = threading.Lock()
+
+        self._next_obstacle:      object | None    = None
+        self._next_obstacle_lock: threading.Lock   = threading.Lock()
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -295,8 +299,12 @@ src.onmessage = e => {{
             return time.time() - self._last_disconnect > 2.0
 
     # ------------------------------------------------------------------ #
-    #  Target subscription                                                 #
+    #  Target / next-obstacle subscription                                 #
     # ------------------------------------------------------------------ #
+
+    def set_next_obstacle(self, obs) -> None:
+        with self._next_obstacle_lock:
+            self._next_obstacle = obs
 
     def set_target(self, forward_mm: float, lateral_mm: float, speed: float) -> None:
         pos, yaw = self._ego_information.get_ego_information()
@@ -319,11 +327,13 @@ src.onmessage = e => {{
         position, yaw                  = self._ego_information.get_ego_information()
         with self._target_lock:
             target = self._target
+        with self._next_obstacle_lock:
+            next_obstacle = self._next_obstacle
 
-        combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw, target)
-        occ_svg     = self._render_occupancy_svg(occupancy, position, yaw, target)
-        sem_svg     = self._render_semantic_svg(semantic, obstacles, position, yaw, target)
-        cluster_svg = self._render_cluster_svg(obstacles, position, yaw, target)
+        combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw, target, next_obstacle)
+        occ_svg     = self._render_occupancy_svg(occupancy, position, yaw, target, next_obstacle)
+        sem_svg     = self._render_semantic_svg(semantic, obstacles, position, yaw, target, next_obstacle)
+        cluster_svg = self._render_cluster_svg(obstacles, position, yaw, target, next_obstacle)
 
         payload = json.dumps({"c": combined, "o": occ_svg, "s": sem_svg, "k": cluster_svg})
         with self._frame_lock:
@@ -335,12 +345,13 @@ src.onmessage = e => {{
 
     def _render_combined_svg(
         self,
-        occupancy: np.ndarray,
-        semantic:  np.ndarray,
-        obstacles: list[Obstacle],
+        occupancy:     np.ndarray,
+        semantic:      np.ndarray,
+        obstacles:     list[Obstacle],
         position,
         yaw,
         target,
+        next_obstacle,
     ) -> str:
         rows, cols = FieldMap.ROWS, FieldMap.COLS
 
@@ -370,6 +381,8 @@ src.onmessage = e => {{
             f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
             self._origin_svg(),
         ]
+        if next_obstacle is not None:
+            parts.append(self._next_obstacle_svg(next_obstacle))
         if target is not None:
             parts.append(self._target_svg(target))
         if position is not None and yaw is not None:
@@ -382,10 +395,11 @@ src.onmessage = e => {{
 
     def _render_occupancy_svg(
         self,
-        occupancy: np.ndarray,
+        occupancy:     np.ndarray,
         position,
         yaw,
         target,
+        next_obstacle,
     ) -> str:
         """
         Grayscale log-odds heatmap as an embedded PNG with pixelated scaling.
@@ -412,6 +426,8 @@ src.onmessage = e => {{
             f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
             self._origin_svg(),
         ]
+        if next_obstacle is not None:
+            parts.append(self._next_obstacle_svg(next_obstacle))
         if target is not None:
             parts.append(self._target_svg(target))
         if position is not None and yaw is not None:
@@ -424,11 +440,12 @@ src.onmessage = e => {{
 
     def _render_semantic_svg(
         self,
-        semantic:  np.ndarray,
-        obstacles: list[Obstacle],
+        semantic:      np.ndarray,
+        obstacles:     list[Obstacle],
         position,
         yaw,
         target,
+        next_obstacle,
     ) -> str:
         """
         Colour-coded semantic label map as an embedded PNG with pixelated scaling.
@@ -456,6 +473,8 @@ src.onmessage = e => {{
             f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
             self._origin_svg(),
         ]
+        if next_obstacle is not None:
+            parts.append(self._next_obstacle_svg(next_obstacle))
         if target is not None:
             parts.append(self._target_svg(target))
         if position is not None and yaw is not None:
@@ -468,10 +487,11 @@ src.onmessage = e => {{
 
     def _render_cluster_svg(
         self,
-        obstacles: list[Obstacle],
+        obstacles:     list[Obstacle],
         position,
         yaw,
         target,
+        next_obstacle,
     ) -> str:
         rows, cols = FieldMap.ROWS, FieldMap.COLS
         palette    = self._CLUSTER_PALETTE
@@ -492,6 +512,8 @@ src.onmessage = e => {{
             f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
             self._origin_svg(),
         ]
+        if next_obstacle is not None:
+            parts.append(self._next_obstacle_svg(next_obstacle))
         if target is not None:
             parts.append(self._target_svg(target))
         if position is not None and yaw is not None:
@@ -506,6 +528,30 @@ src.onmessage = e => {{
     def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
         h = hex_color.lstrip('#')
         return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+    def _next_obstacle_svg(self, obs) -> str:
+        # centroid is (east_mm, north_mm); _grid_idx_from_world_coordinates wants (east, north) row
+        centroid = obs.centroid  # np.array([east, north])
+        arr = np.array([[centroid[0], centroid[1]]], dtype=float)
+        rows_idx, cols_idx = FieldMap._grid_idx_from_world_coordinates(arr)
+        col = int(cols_idx[0])
+        row = FieldMap.ROWS - 1 - int(rows_idx[0])
+
+        if not FieldMap._valid_mask(np.array([row]), np.array([col]))[0]:
+            return ''
+
+        color = obs.color
+        if color is not None:
+            rgb = self._OBSTACLE_COLOR_RGB[color]
+            stroke = f'#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}'
+        else:
+            stroke = self._NEXT_OBSTACLE_COLOR
+
+        r = self._CROSS_R + 6
+        return (
+            f'<circle cx="{col}" cy="{row}" r="{r}" fill="none" '
+            f'stroke="{stroke}" stroke-width="2" stroke-dasharray="3 2"/>'
+        )
 
     def _origin_svg(self) -> str:
         rows, cols = FieldMap._grid_idx_from_world_coordinates(np.zeros((1, 2)))

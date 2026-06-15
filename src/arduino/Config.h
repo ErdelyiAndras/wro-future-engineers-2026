@@ -27,9 +27,9 @@ namespace movement {
 
 namespace steering {
     static constexpr int   SERVO_CENTER_US = 1050;
-    static constexpr int   SERVO_LEFT_US   = 1500;
+    static constexpr int   SERVO_LEFT_US   = 1400;
     static constexpr int   SERVO_RIGHT_US  = 500;
-    static constexpr float MAX_STEER_RAD   = 0.4974f;
+    static constexpr float MAX_STEER_RAD   = 0.4014f;
 } // namespace steering
 
 namespace encoder {
