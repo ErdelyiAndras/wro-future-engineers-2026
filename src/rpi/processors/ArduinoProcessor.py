@@ -10,6 +10,9 @@ class ArduinoProcessor(Processor):
         super().__init__()
         self._ego_information = ego_information
 
+    _MIN_DISTANCE_MM: mm = 0.5
+
     def _process(self, heading: radian, speed: mm, steering: radian, distance: mm) -> None:
-        self._ego_information.update_odometry(distance, steering)
-        self._ego_information.update_imu(heading)
+        if abs(distance) >= self._MIN_DISTANCE_MM:
+            self._ego_information.update_odometry(distance, steering)
+            self._ego_information.update_imu(heading)

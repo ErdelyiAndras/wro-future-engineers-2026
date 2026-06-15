@@ -73,7 +73,7 @@ class SemanticClassifier(Processor):
     _MAX_RMS_DISTANCE:    mm    = 8.0
 
     # Gap splitting
-    _MAX_GAP_LENGTH: mm = 80.0
+    _MAX_GAP_LENGTH: mm = 150.0
 
     # Rejoin and wall classification
     _MIN_SUBSEGMENT_LENGTH: mm  = 150.0
