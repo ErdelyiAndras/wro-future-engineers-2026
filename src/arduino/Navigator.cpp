@@ -20,6 +20,7 @@ void Navigator::setTarget(float forward_mm, float lateral_mm, float speed) {
     }
 
     last_ticks      = encoder.getTicks();
+    reversing       = (speed < 0.0f);
     target_speed    = fabsf(speed);
     x_mm            = 0.0f;
     y_mm            = 0.0f;
@@ -76,7 +77,8 @@ void Navigator::doPursuing() {
         }
         error = config::wrapPi(hold_heading_rad - heading_local);
     } else {
-        error = config::wrapPi(atan2f(dy, dx) - heading_local);
+        float motion_heading = heading_local + (reversing ? static_cast<float>(M_PI) : 0.0f);
+        error = config::wrapPi(atan2f(dy, dx) - motion_heading);
     }
     uint32_t now_ms = millis();
     float    dt     = (now_ms - pid_last_ms) * 1e-3f;
@@ -101,6 +103,10 @@ void Navigator::doPursuing() {
     float steer = config::navigation::HEADING_KP * error +
                   config::navigation::HEADING_KI * pid_integral +
                   config::navigation::HEADING_KD * pid_derivative;
+
+    if (reversing) {
+        steer *= config::navigation::REVERSE_STEER_SIGN;
+    }
 
     steering.setAngle(
         constrain(
@@ -130,7 +136,7 @@ void Navigator::doPursuing() {
         current_speed = desired;
     }
 
-    motor.setTarget(current_speed);
+    motor.setTarget(reversing ? -current_speed : current_speed);
 }
 
 void Navigator::update() {

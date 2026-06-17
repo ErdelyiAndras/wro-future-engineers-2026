@@ -21,8 +21,9 @@ namespace serial {
 namespace movement {
     static constexpr int   MOTOR_DIR         = -1;
     static constexpr float WHEEL_DIAMETER_MM = 43.2f;
-    static constexpr float TICKS_PER_MM      = 15.17f;
+    static constexpr float TICKS_PER_MM      = 14.0f;
     static constexpr float MAX_SPEED         = 255.0f;
+    static constexpr float KICKSTART_DECAY   = 200.0f;
 } // namespace movement
 
 namespace steering {
@@ -48,6 +49,7 @@ namespace navigation {
     static constexpr float ACCEL_RADIUS_MM        = 200.0f;
     static constexpr float DECEL_RADIUS_MM        = 500.0f;
     static constexpr float MIN_SPEED              = 80.0f;
+    static constexpr float REVERSE_STEER_SIGN     = -1.0f;
     static const     float MIN_TURNING_RADIUS_MM  = (WHEELBASE_MM / tanf(steering::MAX_STEER_RAD));
 } // namespace navigation
 

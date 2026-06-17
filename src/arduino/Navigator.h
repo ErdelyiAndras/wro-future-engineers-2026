@@ -17,6 +17,7 @@ public:
 private:
     NavState state        = NavState::IDLE;
     float    target_speed = 0.0f;
+    bool     reversing    = false;
     int32_t  last_ticks   = 0;
 
     float x_mm             = 0.0f;

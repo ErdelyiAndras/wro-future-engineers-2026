@@ -11,8 +11,11 @@ public:
     void update();
 
 private:
-    float target  = 0.0f;
-    bool  stopped = true;
+    float         target         = 0.0f;
+    float         current        = 0.0f;
+    bool          stopped        = true;
+    bool          kickstarting   = false;
+    unsigned long last_update_ms = 0;
 
     void setPwm(float normalized);
 };

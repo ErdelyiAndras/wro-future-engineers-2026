@@ -111,6 +111,9 @@ class FieldMapVisualizer:
         self._next_obstacle:      object | None    = None
         self._next_obstacle_lock: threading.Lock   = threading.Lock()
 
+        self._route:      list[tuple[float, float]] = []
+        self._route_lock: threading.Lock            = threading.Lock()
+
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
     # ------------------------------------------------------------------ #
@@ -306,6 +309,10 @@ src.onmessage = e => {{
         with self._next_obstacle_lock:
             self._next_obstacle = obs
 
+    def set_route(self, route: list[tuple[float, float]]) -> None:
+        with self._route_lock:
+            self._route = list(route)
+
     def set_target(self, forward_mm: float, lateral_mm: float, speed: float) -> None:
         pos, yaw = self._ego_information.get_ego_information()
         if pos is None or yaw is None:
@@ -329,8 +336,10 @@ src.onmessage = e => {{
             target = self._target
         with self._next_obstacle_lock:
             next_obstacle = self._next_obstacle
+        with self._route_lock:
+            route = self._route
 
-        combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw, target, next_obstacle)
+        combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw, target, next_obstacle, route)
         occ_svg     = self._render_occupancy_svg(occupancy, position, yaw, target, next_obstacle)
         sem_svg     = self._render_semantic_svg(semantic, obstacles, position, yaw, target, next_obstacle)
         cluster_svg = self._render_cluster_svg(obstacles, position, yaw, target, next_obstacle)
@@ -352,6 +361,7 @@ src.onmessage = e => {{
         yaw,
         target,
         next_obstacle,
+        route = None,
     ) -> str:
         rows, cols = FieldMap.ROWS, FieldMap.COLS
 
@@ -381,6 +391,8 @@ src.onmessage = e => {{
             f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>',
             self._origin_svg(),
         ]
+        if route:
+            parts.append(self._route_svg(route))
         if next_obstacle is not None:
             parts.append(self._next_obstacle_svg(next_obstacle))
         if target is not None:
@@ -388,6 +400,18 @@ src.onmessage = e => {{
         if position is not None and yaw is not None:
             parts.append(self._ego_svg(np.array(position, dtype=float), yaw))
         return ''.join(parts)
+
+    def _route_svg(self, route: list[tuple[float, float]]) -> str:
+        arr = np.array([[p[1], p[0]] for p in route], dtype=float)
+        rows_idx, cols_idx = FieldMap._grid_idx_from_world_coordinates(arr)
+        pts = ' '.join(
+            f'{int(c)},{FieldMap.ROWS - 1 - int(r)}'
+            for r, c in zip(rows_idx, cols_idx)
+        )
+        return (
+            f'<polyline points="{pts}" fill="none" '
+            f'stroke="{self._TARGET_COLOR}" stroke-width="1" opacity="0.6"/>'
+        )
 
     # ------------------------------------------------------------------ #
     #  SVG generation — occupancy view                                     #
