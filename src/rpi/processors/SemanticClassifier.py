@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.ndimage import binary_dilation
+from scipy.spatial import cKDTree
 from sklearn.cluster import DBSCAN
 
 from processors.Processor import Processor
@@ -56,8 +57,8 @@ class PointCluster:
 
 class SemanticClassifier(Processor):
     # DBSCAN
-    _DBSCAN_EPS:         mm  = 30.0
-    _DBSCAN_MIN_SAMPLES: int = 5
+    _DBSCAN_EPS:         mm  = 70.0
+    _DBSCAN_MIN_SAMPLES: int = 1
 
     # RANSAC
     _RANSAC_ITERATIONS:      int = 50
@@ -65,8 +66,9 @@ class SemanticClassifier(Processor):
     _MAX_CONSECUTIVE_MISSES: int = 4
 
     # Obstacle
-    _MAX_OBSTACLE_EXTENT: mm  = 100.0
+    _MAX_OBSTACLE_EXTENT: mm  = 200.0
     _MIN_OBSTACLE_POINTS: int = 5
+    _MIN_WALL_CLEARANCE:  mm  = 100.0
 
     # Segment quality
     _MIN_LINEARITY_RATIO: float = 0.92
@@ -105,7 +107,10 @@ class SemanticClassifier(Processor):
 
         clusters = self._dbscan_cluster(coords)
 
-        obstacle_clusters, wall_points = self._classify_clusters(clusters)
+        wall_cells = coords[np.isin(
+            labels, [int(CellLabel.WALL), int(CellLabel.PARKING_WALL)]
+        )]
+        obstacle_clusters, wall_points = self._classify_clusters(clusters, wall_cells)
 
         self._field_map.update_obstacles([c.points for c in obstacle_clusters])
 
@@ -147,15 +152,16 @@ class SemanticClassifier(Processor):
 
     def _classify_clusters(
         self,
-        clusters: list[PointCluster],
+        clusters:   list[PointCluster],
+        wall_cells: np.ndarray,
     ) -> tuple[list[PointCluster], np.ndarray]:
-        obstacle_clusters  = []
-        wall_point_batches = []
+        obstacle_candidates = []
+        wall_point_batches  = []
 
         for cluster in clusters:
             if cluster.bounding_box_extent <= self._MAX_OBSTACLE_EXTENT:
                 if len(cluster.points) >= self._MIN_OBSTACLE_POINTS:
-                    obstacle_clusters.append(cluster)
+                    obstacle_candidates.append(cluster)
             else:
                 wall_point_batches.append(cluster.points)
 
@@ -163,7 +169,30 @@ class SemanticClassifier(Processor):
                       if wall_point_batches \
                       else np.empty((0, 2))
 
+        wall_geometry = [w for w in (wall_cells, wall_points) if len(w) > 0]
+        obstacle_clusters = self._reject_obstacles_near_walls(
+            obstacle_candidates,
+            np.vstack(wall_geometry) if wall_geometry else np.empty((0, 2)),
+        )
+
         return obstacle_clusters, wall_points
+
+    def _reject_obstacles_near_walls(
+        self,
+        candidates:  list[PointCluster],
+        wall_cells:  np.ndarray,
+    ) -> list[PointCluster]:
+        if not candidates or len(wall_cells) == 0:
+            return candidates
+
+        tree = cKDTree(wall_cells)
+        kept = []
+        for cluster in candidates:
+            distances, _ = tree.query(cluster.points)
+            if distances.min() > self._MIN_WALL_CLEARANCE:
+                kept.append(cluster)
+
+        return kept
 
     def _detect_walls(
         self,
