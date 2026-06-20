@@ -11,8 +11,8 @@ class EgoInformation:
     _INITIAL_UNCERTAINTY:  float  = 1e4
     _PROCESS_NOISE_V:      mm     = 0.2005
     _PROCESS_NOISE_W:      radian = 0.000321
-    _MEAS_NOISE_LIDAR_XY:  mm     = 10.0
-    _MEAS_NOISE_LIDAR_HDG: radian = 0.05
+    _MEAS_NOISE_LIDAR_XY:  mm     = 753.44
+    _MEAS_NOISE_LIDAR_HDG: radian = 2.27867
     _MEAS_NOISE_IMU_HDG:   radian = 0.001
 
     def __init__(

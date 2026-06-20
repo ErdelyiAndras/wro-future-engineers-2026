@@ -114,6 +114,9 @@ class FieldMapVisualizer:
         self._route:      list[tuple[float, float]] = []
         self._route_lock: threading.Lock            = threading.Lock()
 
+        self._plan:      dict | None    = None
+        self._plan_lock: threading.Lock = threading.Lock()
+
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
     # ------------------------------------------------------------------ #
@@ -156,14 +159,19 @@ class FieldMapVisualizer:
                   padding:6px 18px; border-radius:4px; cursor:pointer;
                   font:12px monospace; }}
   #tabs button.active {{ background:#444; color:#fff; border-color:#888; }}
+  #direction {{ position:fixed; top:10px; left:12px; z-index:10;
+                color:#aaa; background:#222; border:1px solid #444;
+                padding:6px 12px; border-radius:4px; font:12px monospace; }}
 </style>
 </head>
 <body>
+<div id="direction">dir: —</div>
 <div id="tabs">
   <button id="btn-c" onclick="setView('c')" class="active">Combined</button>
   <button id="btn-o" onclick="setView('o')">Occupancy</button>
   <button id="btn-s" onclick="setView('s')">Semantic</button>
   <button id="btn-k" onclick="setView('k')">Clusters</button>
+  <button id="btn-p" onclick="setView('p')">Planning</button>
 </div>
 <svg id="map" viewBox="0 0 {cols} {rows}"
      xmlns="http://www.w3.org/2000/svg"
@@ -225,6 +233,7 @@ const src = new EventSource('/stream');
 src.onmessage = e => {{
   frames = JSON.parse(e.data);
   content.innerHTML = frames[activeView] || '';
+  document.getElementById('direction').textContent = 'dir: ' + (frames.dir || '—');
 }};
 </script>
 </body>
@@ -313,6 +322,10 @@ src.onmessage = e => {{
         with self._route_lock:
             self._route = list(route)
 
+    def set_plan_debug(self, plan: dict) -> None:
+        with self._plan_lock:
+            self._plan = plan
+
     def set_target(self, forward_mm: float, lateral_mm: float, speed: float) -> None:
         pos, yaw = self._ego_information.get_ego_information()
         if pos is None or yaw is None:
@@ -338,13 +351,20 @@ src.onmessage = e => {{
             next_obstacle = self._next_obstacle
         with self._route_lock:
             route = self._route
+        with self._plan_lock:
+            plan = self._plan
 
         combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw, target, next_obstacle, route)
         occ_svg     = self._render_occupancy_svg(occupancy, position, yaw, target, next_obstacle)
         sem_svg     = self._render_semantic_svg(semantic, obstacles, position, yaw, target, next_obstacle)
         cluster_svg = self._render_cluster_svg(obstacles, position, yaw, target, next_obstacle)
+        plan_svg    = self._render_planning_svg(plan, position, yaw, target)
 
-        payload = json.dumps({"c": combined, "o": occ_svg, "s": sem_svg, "k": cluster_svg})
+        direction = self._field_map.direction
+        dir_str   = direction.name if direction is not None else "—"
+
+        payload = json.dumps({"c": combined, "o": occ_svg, "s": sem_svg,
+                              "k": cluster_svg, "p": plan_svg, "dir": dir_str})
         with self._frame_lock:
             self._frame = payload
 
@@ -543,6 +563,149 @@ src.onmessage = e => {{
         if position is not None and yaw is not None:
             parts.append(self._ego_svg(np.array(position, dtype=float), yaw))
         return ''.join(parts)
+
+    # ------------------------------------------------------------------ #
+    #  SVG generation — path-planning view                                 #
+    # ------------------------------------------------------------------ #
+
+    # Clearance heatmap saturates at this distance-to-obstacle (mm): cells with
+    # more headroom than this are full green, tight corridors fade to red.
+    _CLEARANCE_CAP_MM: float = 600.0
+
+    _BLOCKED_RGB:   tuple[int, int, int] = ( 50,  50,  50)  # outside the traversable mask
+    _BLOCK_RGB:     tuple[int, int, int] = (255,  60,   0)  # wrong-side block next to a pillar
+    _TRAIL_RGB:     tuple[int, int, int] = (180,  30, 230)  # breadcrumb penalty overlay
+    _GOAL_COLOR:    str = "#ff00ff"  # selected ray goal cell
+    _PATH_COLOR:    str = "#00e5ff"  # raw A* path
+    _THINNED_COLOR: str = "#ff6600"  # line-of-sight thinned waypoints
+
+    def _render_planning_svg(
+        self,
+        plan,
+        position,
+        yaw,
+        target,
+    ) -> str:
+        """
+        Coarse path-planning grid: clearance heatmap over traversable cells,
+        blocked cells in dark gray, the decaying trail overlaid in magenta, and
+        the selected goal / A* path / thinned waypoints drawn as vectors.
+
+        Only populated while the planner is running reactively (lap 1); once the
+        recorded racing line is being followed there is no live grid to show.
+        """
+        rows, cols = FieldMap.ROWS, FieldMap.COLS
+        parts = [f'<rect width="{cols}" height="{rows}" fill="{self._BACKGROUND}"/>']
+
+        if plan is not None:
+            parts.append(self._planning_image(plan))
+            parts.append(self._origin_svg())
+            parts.append(self._planning_overlay(plan))
+        else:
+            parts.append(self._origin_svg())
+
+        if target is not None:
+            parts.append(self._target_svg(target))
+        if position is not None and yaw is not None:
+            parts.append(self._ego_svg(np.array(position, dtype=float), yaw))
+        return ''.join(parts)
+
+    def _planning_image(self, plan: dict) -> str:
+        trav  = plan["traversable"]
+        D_mm  = plan["D_mm"]
+        trail = plan["trail"]
+        rows, cols = FieldMap.ROWS, FieldMap.COLS
+
+        img = np.empty((*trav.shape, 3), dtype=np.uint8)
+        img[~trav] = self._BLOCKED_RGB
+
+        # Red -> yellow -> green ramp on clearance, so tight gaps stand out.
+        t = np.clip(D_mm / self._CLEARANCE_CAP_MM, 0.0, 1.0)
+        R = np.where(t < 0.5, 255.0, (1.0 - (t - 0.5) * 2.0) * 255.0)
+        G = np.where(t < 0.5, t * 2.0 * 255.0, 255.0)
+        B = np.zeros_like(t)
+        heat = np.clip(np.stack([R, G, B], axis=-1), 0, 255).astype(np.uint8)
+        img[trav] = heat[trav]
+
+        # Wrong-side block on top of the plain blocked cells, so the region the
+        # planner sealed next to a colour-confirmed pillar is distinguishable
+        # from real walls/obstacles.
+        block = plan.get("block")
+        if block is not None:
+            img[block] = self._BLOCK_RGB
+
+        # Trail overlay: blend toward magenta by penalty strength.
+        peak = float(trail.max())
+        if peak > 1e-6:
+            a = np.clip(trail / peak, 0.0, 1.0)[..., np.newaxis]
+            overlay = np.array(self._TRAIL_RGB, dtype=np.float32)
+            blended = (1.0 - a) * img + a * overlay
+            mask = (trail > 1e-3)
+            img[mask] = blended[mask].astype(np.uint8)
+
+        img_bgr = cv2.cvtColor(np.flipud(img), cv2.COLOR_RGB2BGR)
+        _, buf  = cv2.imencode('.png', img_bgr)
+        b64     = base64.b64encode(buf.tobytes()).decode('ascii')
+        return (
+            f'<image x="0" y="0" width="{cols}" height="{rows}" '
+            f'image-rendering="pixelated" href="data:image/png;base64,{b64}"/>'
+        )
+
+    def _planning_overlay(self, plan: dict) -> str:
+        K  = plan["K"]
+        rr = plan["traversable"].shape[0]
+        parts: list[str] = []
+
+        path = plan.get("path")
+        if path:
+            pts = ' '.join(self._cell_pt(c, K, rr) for c in path)
+            parts.append(
+                f'<polyline points="{pts}" fill="none" '
+                f'stroke="{self._PATH_COLOR}" stroke-width="1" opacity="0.45"/>'
+            )
+
+        thinned = plan.get("thinned")
+        if thinned:
+            pts = ' '.join(self._cell_pt(c, K, rr) for c in thinned)
+            parts.append(
+                f'<polyline points="{pts}" fill="none" '
+                f'stroke="{self._THINNED_COLOR}" stroke-width="1.5"/>'
+            )
+            for cell in thinned:
+                x, y = self._coarse_cell_to_svg(cell, K, rr)
+                parts.append(
+                    f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2" '
+                    f'fill="{self._THINNED_COLOR}"/>'
+                )
+
+        goal = plan.get("goal")
+        if goal is not None:
+            x, y = self._coarse_cell_to_svg(goal, K, rr)
+            s = 4
+            parts.append(
+                f'<rect x="{x - s:.1f}" y="{y - s:.1f}" width="{2 * s}" height="{2 * s}" '
+                f'fill="none" stroke="{self._GOAL_COLOR}" stroke-width="1.5"/>'
+            )
+
+        current = plan.get("current")
+        if current is not None:
+            x, y = self._coarse_cell_to_svg(current, K, rr)
+            parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2" fill="{self._EGO_COLOR}"/>')
+
+        return ''.join(parts)
+
+    @staticmethod
+    def _coarse_cell_to_svg(cell, K: int, rr: int) -> tuple[float, float]:
+        # Centre of coarse cell (row, col) in SVG units. Matches the flipud +
+        # K-times upscaling of the coarse image so overlay lands on the heatmap.
+        r, c = cell
+        x = c * K + K / 2.0
+        y = (rr - 1 - r) * K + K / 2.0
+        return x, y
+
+    def _cell_pt(self, cell, K: int, rr: int) -> str:
+        x, y = self._coarse_cell_to_svg(cell, K, rr)
+        return f'{x:.1f},{y:.1f}'
 
     # ------------------------------------------------------------------ #
     #  SVG helpers                                                         #

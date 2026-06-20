@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum, IntEnum, auto
 from threading import Lock
@@ -19,6 +20,10 @@ class Obstacle:
     green_votes:            int = 0
     observation_count:      int = 0
     frames_since_last_seen: int = 0
+
+    pass_normal:            np.ndarray | None    = None
+    pass_color:             ObstacleColor | None = None
+    pass_anchor:            np.ndarray | None    = None
 
     @property
     def centroid(self) -> np.ndarray:
@@ -43,6 +48,11 @@ class Obstacle:
             green_votes            = self.green_votes,
             observation_count      = self.observation_count,
             frames_since_last_seen = self.frames_since_last_seen,
+            pass_normal            = None if self.pass_normal is None
+                                          else self.pass_normal.copy(),
+            pass_color             = self.pass_color,
+            pass_anchor            = None if self.pass_anchor is None
+                                          else self.pass_anchor.copy(),
         )
 
 class Direction(Enum):
@@ -70,7 +80,11 @@ class FieldMap:
 
     _MATCH_RADIUS:    mm  = 80.0
     _STALE_FRAMES:    int = 5
-    _COLOR_THRESHOLD: int = 10
+    _COLOR_THRESHOLD: int = 7
+
+    TOTAL_LAPS:         int = 3
+    _LAP_DEPART_RADIUS: mm  = 500.0
+    _LAP_ARRIVE_RADIUS: mm  = 300.0
 
     def __init__(self) -> None:
         self._lock:      Lock             = Lock()
@@ -78,6 +92,10 @@ class FieldMap:
         self._occupancy: np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype = np.float32)
         self._semantic:  np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype = np.uint8)
         self._obstacles: list[Obstacle]   = []
+
+        self._lap_count: int          = 0
+        self._lap_start: Point | None = None
+        self._lap_left:  bool         = False
 
     @property
     def direction(self) -> Direction | None:
@@ -198,9 +216,49 @@ class FieldMap:
                         obs.red_votes   = max(0, obs.red_votes - 1)
                     break
 
+    def latch_pass_side(
+        self,
+        obstacle: Obstacle,
+        normal:   np.ndarray,
+        color:    ObstacleColor,
+        anchor:   np.ndarray,
+    ) -> None:
+        with self._lock:
+            for obs in self._obstacles:
+                if obs.cells & obstacle.cells:
+                    if obs.pass_normal is None or obs.pass_color != color:
+                        obs.pass_normal = normal
+                        obs.pass_color  = color
+                        obs.pass_anchor = anchor
+                    break
+
     def get_obstacles(self) -> list[Obstacle]:
         with self._lock:
             return [obs.copy() for obs in self._obstacles]
+
+    def update_lap_progress(self, pos: Point) -> int:
+        with self._lock:
+            if self._lap_start is None:
+                self._lap_start = pos
+                return self._lap_count
+
+            d = math.hypot(pos[0] - self._lap_start[0], pos[1] - self._lap_start[1])
+            if not self._lap_left:
+                if d > self._LAP_DEPART_RADIUS:
+                    self._lap_left = True
+            elif d < self._LAP_ARRIVE_RADIUS:
+                self._lap_count += 1
+                self._lap_left  = False
+
+            return self._lap_count
+
+    @property
+    def lap_count(self) -> int:
+        return self._lap_count
+
+    @property
+    def start_position(self) -> Point | None:
+        return self._lap_start
 
     def set_label(
         self,
