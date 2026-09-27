@@ -1,10 +1,9 @@
 import time
-import threading
-import webbrowser
-
 import argparse
 
 import numpy as np
+
+from gpiozero import Button
 
 from components import Arduino, Camera, Lidar, Ticker
 from control import EgoInformation, FieldMap
@@ -15,20 +14,15 @@ from processors import (
     DirectionDetector,
     LidarProcessor,
     PathPlanningProcessor,
-    FollowTheGapPlanner,
     GeometricTrackPlanner,
+    OpenChallengePathPlanner,
     SemanticClassifier,
     ObstacleColorRanges,
     CameraIntrinsics,
     CameraExtrinsics,
 )
-
 from recording import Recorder
 from utils import mm, degree, Point
-
-from FieldMapVisualiser import FieldMapVisualizer
-from CameraVisualizer import CameraVisualizer
-from LidarVisualizer import LidarVisualizer
 
 # ego information
 _WHEELBASE: mm = 89.6251
@@ -69,18 +63,21 @@ _OBSTACLE_COLOR_RANGES = ObstacleColorRanges(
     green_upper = np.array([ 97, 164, 200], dtype = np.uint8),
 )
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lidar-port',   default = '/dev/lidar',   help = 'LiDAR serial port')
     parser.add_argument('--arduino-port', default = '/dev/arduino', help = 'Arduino serial port')
     parser.add_argument('--camera-port',  default = 0, type = int,  help = 'Camera device index')
-    parser.add_argument('--visualise',    action  = 'store_true',   help = 'Skip opening visualizer in browser')
+    parser.add_argument('--button-pin',   default = 17, type = int, help = 'BCM GPIO pin for the start button')
     parser.add_argument('--no-record',    action  = 'store_true',   help = 'Disable signal recording')
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    start_button = Button(args.button_pin, pull_up = True)
 
     ego_information = EgoInformation(wheelbase = _WHEELBASE)
     field_map = FieldMap()
@@ -96,8 +93,7 @@ def main():
         port = args.arduino_port
     )
     classification_ticker = Ticker(interval = 0.1)
-    planning_ticker = Ticker(interval = 0.2)
-
+    planning_ticker       = Ticker(interval = 0.2)
 
     lidar_processor = LidarProcessor(
         field_map,
@@ -105,46 +101,25 @@ def main():
         offset_angle = _LIDAR_OFFSET_ANGLE,
         mount_offset = _LIDAR_MOUNT_OFFSET
     )
-    semantic_classifier = SemanticClassifier(
-        field_map
-    )
-    camera_processor = CameraProcessor(
+    path_planning_processor = OpenChallengePathPlanner(
         field_map,
         ego_information,
-        intrinsics = _CAMERA_INTRINSICS,
-        extrinsics = _CAMERA_EXTRINSICS,
-        obstacle_color_ranges = _OBSTACLE_COLOR_RANGES
-    )
-    path_planning_processor = FollowTheGapPlanner(
-        field_map,
-        ego_information
+        _LIDAR_OFFSET_ANGLE
     )
     arduino_processor = ArduinoProcessor(
         ego_information
-    )
-    collision_guard = CollisionGuard(
-        lidar_offset_angle = _LIDAR_OFFSET_ANGLE
     )
     direction_detector = DirectionDetector(
         field_map
     )
 
-
     lidar.on_scan                     += lidar_processor
-    lidar.on_scan                     += collision_guard
     lidar.on_scan                     += direction_detector
-
-    camera.on_frame                   += camera_processor
-
-    classification_ticker.on_tick     += semantic_classifier
-
-    planning_ticker.on_tick           += path_planning_processor
+    lidar.on_scan += path_planning_processor
 
     arduino.on_state                  += arduino_processor
     path_planning_processor.on_target += arduino.set_target
     path_planning_processor.on_stop   += arduino.stop
-    collision_guard.on_collision      += path_planning_processor.notify_collision
-
 
     # Recorder taps go after the wiring above so ego_pose is sampled after
     # ArduinoProcessor has ingested the same state message.
@@ -154,40 +129,14 @@ def main():
     recorder.attach_array(arduino.on_state, 'arduino_state',
                           fields = ('heading_rad', 'speed_mm_s', 'steering_rad', 'distance_mm'))
     recorder.attach_pose(arduino.on_state, ego_information)
-    recorder.attach_marker(collision_guard.on_collision, 'collision')
     recorder.attach_planner(path_planning_processor)
 
-
-    if args.visualise:
-        field_map_visualizer = FieldMapVisualizer(
-            field_map,
-            ego_information
-        )
-        field_map_visualizer.start()
-        path_planning_processor.on_target        += field_map_visualizer.set_target
-        path_planning_processor.on_next_obstacle += field_map_visualizer.set_next_obstacle
-        path_planning_processor.on_route         += field_map_visualizer.set_route
-        path_planning_processor.on_plan_debug    += field_map_visualizer.set_plan_debug
-        webbrowser.open(f"http://localhost:{FieldMapVisualizer._DEFAULT_PORT}")
-
-        camera_visualizer = CameraVisualizer(
-            field_map,
-            ego_information,
-            _CAMERA_INTRINSICS,
-            _CAMERA_EXTRINSICS
-        )
-        camera_visualizer.start()
-        webbrowser.open(f"http://localhost:{CameraVisualizer._DEFAULT_PORT}")
-        camera.on_frame += camera_visualizer
-
-        lidar_visualizer = LidarVisualizer(offset_angle=_LIDAR_OFFSET_ANGLE)
-        lidar_visualizer.start()
-        webbrowser.open(f"http://localhost:{LidarVisualizer._DEFAULT_PORT}")
-        lidar.on_scan += lidar_visualizer
-
-
     with recorder, lidar, camera, arduino, classification_ticker, planning_ticker:
-        time.sleep(2)
+        print("Comp: Ready. Press the start button to begin.")
+        start_button.wait_for_press()
+        print("Starting.")
+
+        time.sleep(0.5)
 
         lidar.start()
         camera.start()
@@ -196,18 +145,11 @@ def main():
         planning_ticker.start()
 
         try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            pass
+            print("Running. Press the button again to stop.")
+            start_button.wait_for_press()
+            print("Stopping.")
         finally:
             arduino.stop()
-
-
-    if args.visualise:
-        field_map_visualizer.stop()
-        camera_visualizer.stop()
-        lidar_visualizer.stop()
 
 
 if __name__ == '__main__':

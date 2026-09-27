@@ -15,15 +15,14 @@ from processors import (
     DirectionDetector,
     LidarProcessor,
     PathPlanningProcessor,
-    FollowTheGapPlanner,
     GeometricTrackPlanner,
+    OpenChallengePathPlanner,
     SemanticClassifier,
     ObstacleColorRanges,
     CameraIntrinsics,
     CameraExtrinsics,
 )
 
-from recording import Recorder
 from utils import mm, degree, Point
 
 from FieldMapVisualiser import FieldMapVisualizer
@@ -61,12 +60,12 @@ _CAMERA_EXTRINSICS = CameraExtrinsics(
     roll  = 0.0
 )
 _OBSTACLE_COLOR_RANGES = ObstacleColorRanges(
-    red_lower_1 = np.array([  0, 149, 134], dtype = np.uint8),
-    red_upper_1 = np.array([ 10, 248, 228], dtype = np.uint8),
-    red_lower_2 = np.array([170, 149, 134], dtype = np.uint8),
-    red_upper_2 = np.array([180, 248, 228], dtype = np.uint8),
-    green_lower = np.array([ 36,  40,  90], dtype = np.uint8),
-    green_upper = np.array([ 97, 164, 200], dtype = np.uint8),
+    red_lower_1 = np.array([  0,  66,  58], dtype = np.uint8),
+    red_upper_1 = np.array([ 10, 228, 195], dtype = np.uint8),
+    red_lower_2 = np.array([170,  66,  58], dtype = np.uint8),
+    red_upper_2 = np.array([180, 228, 195], dtype = np.uint8),
+    green_lower = np.array([ 31,  55,   0], dtype = np.uint8),
+    green_upper = np.array([106, 255, 145], dtype = np.uint8),
 )
 
 def parse_args():
@@ -75,7 +74,6 @@ def parse_args():
     parser.add_argument('--arduino-port', default = '/dev/arduino', help = 'Arduino serial port')
     parser.add_argument('--camera-port',  default = 0, type = int,  help = 'Camera device index')
     parser.add_argument('--visualise',    action  = 'store_true',   help = 'Skip opening visualizer in browser')
-    parser.add_argument('--no-record',    action  = 'store_true',   help = 'Disable signal recording')
     return parser.parse_args()
 
 
@@ -105,25 +103,13 @@ def main():
         offset_angle = _LIDAR_OFFSET_ANGLE,
         mount_offset = _LIDAR_MOUNT_OFFSET
     )
-    semantic_classifier = SemanticClassifier(
-        field_map
-    )
-    camera_processor = CameraProcessor(
+    path_planning_processor = OpenChallengePathPlanner(
         field_map,
         ego_information,
-        intrinsics = _CAMERA_INTRINSICS,
-        extrinsics = _CAMERA_EXTRINSICS,
-        obstacle_color_ranges = _OBSTACLE_COLOR_RANGES
-    )
-    path_planning_processor = FollowTheGapPlanner(
-        field_map,
-        ego_information
+        _LIDAR_OFFSET_ANGLE
     )
     arduino_processor = ArduinoProcessor(
         ego_information
-    )
-    collision_guard = CollisionGuard(
-        lidar_offset_angle = _LIDAR_OFFSET_ANGLE
     )
     direction_detector = DirectionDetector(
         field_map
@@ -131,32 +117,12 @@ def main():
 
 
     lidar.on_scan                     += lidar_processor
-    lidar.on_scan                     += collision_guard
     lidar.on_scan                     += direction_detector
-
-    camera.on_frame                   += camera_processor
-
-    classification_ticker.on_tick     += semantic_classifier
-
-    planning_ticker.on_tick           += path_planning_processor
+    lidar.on_scan += path_planning_processor
 
     arduino.on_state                  += arduino_processor
     path_planning_processor.on_target += arduino.set_target
     path_planning_processor.on_stop   += arduino.stop
-    collision_guard.on_collision      += path_planning_processor.notify_collision
-
-
-    # Recorder taps go after the wiring above so ego_pose is sampled after
-    # ArduinoProcessor has ingested the same state message.
-    recorder = Recorder.create_default(enabled = not args.no_record)
-    recorder.attach_scan(lidar.on_scan, ego = ego_information)
-    recorder.attach_jpeg(camera.on_frame)
-    recorder.attach_array(arduino.on_state, 'arduino_state',
-                          fields = ('heading_rad', 'speed_mm_s', 'steering_rad', 'distance_mm'))
-    recorder.attach_pose(arduino.on_state, ego_information)
-    recorder.attach_marker(collision_guard.on_collision, 'collision')
-    recorder.attach_planner(path_planning_processor)
-
 
     if args.visualise:
         field_map_visualizer = FieldMapVisualizer(
@@ -164,10 +130,6 @@ def main():
             ego_information
         )
         field_map_visualizer.start()
-        path_planning_processor.on_target        += field_map_visualizer.set_target
-        path_planning_processor.on_next_obstacle += field_map_visualizer.set_next_obstacle
-        path_planning_processor.on_route         += field_map_visualizer.set_route
-        path_planning_processor.on_plan_debug    += field_map_visualizer.set_plan_debug
         webbrowser.open(f"http://localhost:{FieldMapVisualizer._DEFAULT_PORT}")
 
         camera_visualizer = CameraVisualizer(
@@ -186,7 +148,7 @@ def main():
         lidar.on_scan += lidar_visualizer
 
 
-    with recorder, lidar, camera, arduino, classification_ticker, planning_ticker:
+    with lidar, camera, arduino, classification_ticker, planning_ticker:
         time.sleep(2)
 
         lidar.start()

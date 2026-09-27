@@ -81,6 +81,7 @@ class FieldMapVisualizer:
     _TARGET_COLOR:        str = "#ff6600"  # orange — pure-pursuit lookahead point
     _NEXT_OBSTACLE_COLOR: str = "#ffffff"  # white ring — next obstacle path planner targets
     _TEXT_COLOR:          str = "#333333"
+    _EST_WALL_RGB:        tuple[int, int, int] = (80, 160, 255)  # blue — estimated walls
 
     _ARROW_LEN:   int = 30    # SVG units = grid cells = 300 mm
     _CROSS_R:     int = 2     # robot circle radius
@@ -116,6 +117,12 @@ class FieldMapVisualizer:
 
         self._plan:      dict | None    = None
         self._plan_lock: threading.Lock = threading.Lock()
+
+        # Sticky estimated-wall data: once computed, keep showing even if a
+        # later plan frame has no new estimate (e.g. early frames, recovery).
+        self._est_cache:   np.ndarray | None          = None
+        self._theta_cache: float | None               = None
+        self._isec_cache:  list[tuple[float, float]]  = []
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -165,7 +172,7 @@ class FieldMapVisualizer:
 </style>
 </head>
 <body>
-<div id="direction">dir: —</div>
+<div id="direction">dir: — &nbsp;|&nbsp; lap: 0</div>
 <div id="tabs">
   <button id="btn-c" onclick="setView('c')" class="active">Combined</button>
   <button id="btn-o" onclick="setView('o')">Occupancy</button>
@@ -233,7 +240,8 @@ const src = new EventSource('/stream');
 src.onmessage = e => {{
   frames = JSON.parse(e.data);
   content.innerHTML = frames[activeView] || '';
-  document.getElementById('direction').textContent = 'dir: ' + (frames.dir || '—');
+  document.getElementById('direction').textContent =
+    'dir: ' + (frames.dir || '—') + '  |  lap: ' + (frames.lap ?? 0);
 }};
 </script>
 </body>
@@ -324,6 +332,15 @@ src.onmessage = e => {{
 
     def set_plan_debug(self, plan: dict) -> None:
         with self._plan_lock:
+            est = plan.get("estimated")
+            if est is not None and est.any():
+                self._est_cache = est
+            theta = plan.get("track_theta")
+            if theta is not None:
+                self._theta_cache = theta
+            isecs = plan.get("intersections")
+            if isecs is not None:
+                self._isec_cache = isecs
             self._plan = plan
 
     def set_target(self, forward_mm: float, lateral_mm: float, speed: float) -> None:
@@ -352,9 +369,12 @@ src.onmessage = e => {{
         with self._route_lock:
             route = self._route
         with self._plan_lock:
-            plan = self._plan
+            plan        = self._plan
+            est_cache   = self._est_cache
+            theta_cache = self._theta_cache
+            isec_cache  = self._isec_cache
 
-        combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw, target, next_obstacle, route)
+        combined    = self._render_combined_svg(occupancy, semantic, obstacles, position, yaw, target, next_obstacle, route, plan, est_cache, theta_cache, isec_cache)
         occ_svg     = self._render_occupancy_svg(occupancy, position, yaw, target, next_obstacle)
         sem_svg     = self._render_semantic_svg(semantic, obstacles, position, yaw, target, next_obstacle)
         cluster_svg = self._render_cluster_svg(obstacles, position, yaw, target, next_obstacle)
@@ -362,9 +382,11 @@ src.onmessage = e => {{
 
         direction = self._field_map.direction
         dir_str   = direction.name if direction is not None else "—"
+        lap_count = self._field_map.lap_count
 
         payload = json.dumps({"c": combined, "o": occ_svg, "s": sem_svg,
-                              "k": cluster_svg, "p": plan_svg, "dir": dir_str})
+                              "k": cluster_svg, "p": plan_svg, "dir": dir_str,
+                              "lap": lap_count})
         with self._frame_lock:
             self._frame = payload
 
@@ -381,7 +403,11 @@ src.onmessage = e => {{
         yaw,
         target,
         next_obstacle,
-        route = None,
+        route      = None,
+        plan:        dict | None               = None,
+        est_cache:   np.ndarray | None         = None,
+        theta_cache: float | None              = None,
+        isec_cache:  list[tuple[float, float]] | None = None,
     ) -> str:
         rows, cols = FieldMap.ROWS, FieldMap.COLS
 
@@ -391,7 +417,7 @@ src.onmessage = e => {{
         unknown_mask = (semantic == int(CellLabel.UNKNOWN)) & (occupancy > 0.0)
         img_rgb[unknown_mask] = self._hex_to_rgb(self._OCCUPIED_UNKNOWN)
 
-        # Semantic labeled cells on top — only where occupancy evidence exists
+        # Semantic labeled cells — only where occupancy evidence exists
         for label_int, hex_color in self._LABEL_COLORS.items():
             img_rgb[(semantic == label_int) & (occupancy > 0.0)] = self._hex_to_rgb(hex_color)
 
@@ -400,6 +426,16 @@ src.onmessage = e => {{
             if obs.color is not None and obs.cells:
                 cell_arr = np.array(list(obs.cells), dtype=int)
                 img_rgb[cell_arr[:, 0], cell_arr[:, 1]] = self._OBSTACLE_COLOR_RGB[obs.color]
+
+        # Estimated walls — use current frame's mask or fall back to the cache.
+        K         = (plan.get("K", 5) if plan is not None else 5)
+        estimated = (plan.get("estimated") if plan is not None else None)
+        if estimated is None or not estimated.any():
+            estimated = est_cache
+        if estimated is not None and estimated.any():
+            est_full = np.repeat(np.repeat(estimated, K, axis=0), K, axis=1)
+            est_full = est_full[:rows, :cols]
+            img_rgb[est_full] = self._EST_WALL_RGB
 
         img_bgr = cv2.cvtColor(np.flipud(img_rgb), cv2.COLOR_RGB2BGR)
         _, buf  = cv2.imencode('.png', img_bgr)
@@ -413,6 +449,13 @@ src.onmessage = e => {{
         ]
         if route:
             parts.append(self._route_svg(route))
+        # Intersection dots — current frame or cache
+        theta         = (plan.get("track_theta")    if plan is not None else None) or theta_cache
+        intersections = (plan.get("intersections")  if plan is not None else None)
+        if intersections is None:
+            intersections = isec_cache
+        if theta is not None and intersections:
+            parts.append(self._intersections_svg(intersections, theta))
         if next_obstacle is not None:
             parts.append(self._next_obstacle_svg(next_obstacle))
         if target is not None:
@@ -420,6 +463,28 @@ src.onmessage = e => {{
         if position is not None and yaw is not None:
             parts.append(self._ego_svg(np.array(position, dtype=float), yaw))
         return ''.join(parts)
+
+    def _intersections_svg(
+        self,
+        intersections: list[tuple[float, float]],
+        theta:         float,
+    ) -> str:
+        """Draw candidate corner points (V-wall × H-wall intersections) as circles."""
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+        circles = []
+        for u, v in intersections:
+            # Aligned frame → world
+            north = u * cos_t - v * sin_t
+            east  = u * sin_t + v * cos_t
+            col = (east  + FieldMap.ORIGIN[0]) / FieldMap.CELL_SIZE
+            row = (north + FieldMap.ORIGIN[1]) / FieldMap.CELL_SIZE
+            svg_x = col
+            svg_y = FieldMap.ROWS - 1 - row
+            circles.append(
+                f'<circle cx="{svg_x:.1f}" cy="{svg_y:.1f}" r="5" '
+                f'fill="yellow" stroke="black" stroke-width="1" opacity="0.85"/>'
+            )
+        return ''.join(circles)
 
     def _route_svg(self, route: list[tuple[float, float]]) -> str:
         arr = np.array([[p[1], p[0]] for p in route], dtype=float)
@@ -457,7 +522,7 @@ src.onmessage = e => {{
         lo_range   = FieldMap.L_MAX - FieldMap.L_MIN
 
         img          = np.full((rows, cols), 255, dtype=np.uint8)
-        observed     = occupancy != 0.0
+        observed     = ~np.isnan(occupancy)
         vals         = np.clip(occupancy[observed], FieldMap.L_MIN, FieldMap.L_MAX)
         img[observed] = ((1.0 - (vals - FieldMap.L_MIN) / lo_range) * 220).astype(np.uint8)
 
