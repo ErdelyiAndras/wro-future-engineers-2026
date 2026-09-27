@@ -73,7 +73,7 @@ class FieldMap:
     COLS:      int   = int(WIDTH  // CELL_SIZE)
     ORIGIN:    Point = (3000.0, 3000.0)
 
-    _L_OCC:  float =  0.85
+    _L_OCC:  float =  0.95
     _L_FREE: float = -0.40
     L_MIN:   float = -2.0
     L_MAX:   float =  3.5
@@ -84,12 +84,12 @@ class FieldMap:
 
     TOTAL_LAPS:         int = 3
     _LAP_DEPART_RADIUS: mm  = 500.0
-    _LAP_ARRIVE_RADIUS: mm  = 300.0
+    _LAP_ARRIVE_RADIUS: mm  = 400.0
 
     def __init__(self) -> None:
         self._lock:      Lock             = Lock()
         self._direction: Direction | None = None
-        self._occupancy: np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype = np.float32)
+        self._occupancy: np.ndarray       = np.full((self.ROWS, self.COLS), np.nan, dtype = np.float32)
         self._semantic:  np.ndarray       = np.zeros((self.ROWS, self.COLS), dtype = np.uint8)
         self._obstacles: list[Obstacle]   = []
 
@@ -149,10 +149,16 @@ class FieldMap:
                     free_cols      = cols_f[in_bounds]
 
         with self._lock:
-            np.add.at(self._occupancy, (rows_hit[valid_hit], cols_hit[valid_hit]), self._L_OCC)
+            hit_r, hit_c = rows_hit[valid_hit], cols_hit[valid_hit]
+            nan_hit = np.isnan(self._occupancy[hit_r, hit_c])
+            if nan_hit.any():
+                self._occupancy[hit_r[nan_hit], hit_c[nan_hit]] = 0.0
+            np.add.at(self._occupancy, (hit_r, hit_c), self._L_OCC)
 
             if len(free_rows) > 0:
-                # unknown = (self._semantic[free_rows, free_cols] == CellLabel.UNKNOWN) | True
+                nan_free = np.isnan(self._occupancy[free_rows, free_cols])
+                if nan_free.any():
+                    self._occupancy[free_rows[nan_free], free_cols[nan_free]] = 0.0
                 np.add.at(self._occupancy, (free_rows, free_cols), self._L_FREE)
 
             np.clip(self._occupancy, self.L_MIN, self.L_MAX, out = self._occupancy)
@@ -288,6 +294,25 @@ class FieldMap:
 
         coords = self._world_from_grid_idx(rows, cols)
         return coords, labels
+
+    def sample_cells(
+        self,
+        rows: np.ndarray,
+        cols: np.ndarray,
+    ) -> np.ndarray:
+        """Occupancy log-odds at the given grid indices, ``NaN`` out of bounds.
+
+        A batched, lock-held read for callers that raycast the grid (e.g. the
+        planner's memory scan): pass index arrays of any shape and get an array
+        of the same shape back, without copying the whole grid. Cells never
+        observed stay ``NaN`` (the grid's own "unknown"); out-of-bounds indices
+        are ``NaN`` too, so a ray leaving the arena reads as empty, not a wall.
+        """
+        valid = self._valid_mask(rows, cols)
+        out   = np.full(rows.shape, np.nan, dtype = np.float32)
+        with self._lock:
+            out[valid] = self._occupancy[rows[valid], cols[valid]]
+        return out
 
     def snapshot(self) -> tuple[np.ndarray, np.ndarray, list[Obstacle]]:
         with self._lock:

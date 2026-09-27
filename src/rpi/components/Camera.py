@@ -38,9 +38,15 @@ class Camera(Component):
                 pass
 
     def _run(self) -> None:
+        misses = 0
         while self._is_running:
             ret, frame = self._cap.read()
-            if not ret:
-                break
+            if not ret or frame is None:
+                misses += 1
+                if misses >= 60:
+                    print("Camera: read failed 60x in a row, stopping capture.")
+                    break
+                continue
+            misses = 0
             frame = cv2.rotate(frame, cv2.ROTATE_180)
             self.on_frame(frame)

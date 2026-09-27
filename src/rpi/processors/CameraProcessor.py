@@ -97,22 +97,40 @@ class CameraProcessor(Processor):
         self._sample_radius:         int                 = sample_radius
         self._min_color_ratio:       float               = min_color_ratio
 
+        self._frame_count: int = 0
+        self._debug_every: int = 30   # print a diagnostic line every N frames (0 = off)
+        self._save_dir:    str = 'recordings/cam_debug'  # annotated frames land here (None = off)
+        self._save_every:  int = 15   # save a frame every N frames that have an obstacle
+        self._save_cap:    int = 40   # stop after this many, so disk doesn't fill
+        self._saved:       int = 0
+
     def _process(self, frame: np.ndarray) -> None:
+        self._frame_count += 1
+        report = self._debug_every > 0 and self._frame_count % self._debug_every == 0
+
         ego_pos, yaw = self._ego_information.get_ego_information()
         if ego_pos is None or yaw is None:
+            if report:
+                print(f"[cam] frame {self._frame_count}: no ego pose yet")
             return
 
         ego_pos   = np.asarray(ego_pos, dtype = np.float64)
         obstacles = self._field_map.get_obstacles()
         if not obstacles:
+            if report:
+                print(f"[cam] frame {self._frame_count}: {frame.shape[1]}x{frame.shape[0]}, "
+                      f"0 obstacles to classify")
             return
 
         h, w = frame.shape[:2]
         hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
+        notes:  list[str]   = []
+        marks:  list[tuple] = []   # (u, v, in_frame, red, green, color) for annotation
         for obs in obstacles:
             P_cam = self._world_to_camera(obs.centroid.reshape(1, 2), ego_pos, yaw)
             if P_cam[0, 2] <= 0:
+                notes.append("behind-camera")
                 continue
 
             pts, _ = cv2.projectPoints(
@@ -125,11 +143,48 @@ class CameraProcessor(Processor):
             v = int(pts[0, 0, 1])
 
             if not (0 <= u < w and 0 <= v < h):
+                notes.append(f"off-frame(u={u},v={v})")
                 continue
 
-            color = self._classify_color(hsv, u, v, h, w)
+            color, red_ratio, green_ratio = self._classify_color(hsv, u, v, h, w)
             if color is not None:
                 self._field_map.vote_obstacle_color(obs, color)
+            notes.append(f"u={u},v={v},red={red_ratio:.2f},green={green_ratio:.2f}"
+                         f"->{color.value if color else 'none'}")
+            marks.append((u, v, True, red_ratio, green_ratio, color))
+
+        if report:
+            print(f"[cam] frame {self._frame_count}: {w}x{h}, {len(obstacles)} obs | "
+                  + " ; ".join(notes))
+
+        self._save_debug_frame(frame, marks)
+
+    def _save_debug_frame(self, frame: np.ndarray, marks: list[tuple]) -> None:
+        # Write an annotated frame to disk so the camera view can be inspected
+        # offline: the sample point, the patch box, and the red/green ratios. Only
+        # every _save_every-th frame, capped, so it can't fill the disk.
+        if self._save_dir is None or self._saved >= self._save_cap:
+            return
+        if self._frame_count % self._save_every != 0:
+            return
+
+        import os
+        os.makedirs(self._save_dir, exist_ok = True)
+        img = frame.copy()
+        r   = self._sample_radius
+        for u, v, _in, red_ratio, green_ratio, color in marks:
+            hit = (0, 0, 255) if color and color.value == 'red' else \
+                  (0, 255, 0) if color and color.value == 'green' else (0, 255, 255)
+            cv2.rectangle(img, (u - r, v - r), (u + r, v + r), hit, 2)
+            cv2.drawMarker(img, (u, v), hit, cv2.MARKER_CROSS, 16, 2)
+            cv2.putText(img, f"R{red_ratio:.2f} G{green_ratio:.2f} {color.value if color else 'none'}",
+                        (max(0, u - 60), max(15, v - r - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, hit, 1, cv2.LINE_AA)
+        cv2.putText(img, f"frame {self._frame_count}", (8, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+        path = f"{self._save_dir}/frame_{self._frame_count:05d}.jpg"
+        if cv2.imwrite(path, img):
+            self._saved += 1
 
     def _world_to_camera(
         self,
@@ -163,14 +218,14 @@ class CameraProcessor(Processor):
         v:   int,
         h:   int,
         w:   int,
-    ) -> ObstacleColor | None:
+    ) -> tuple[ObstacleColor | None, float, float]:
         r     = self._sample_radius
         patch = hsv[
             max(0, v - r) : min(h, v + r),
             max(0, u - r) : min(w, u + r),
         ]
         if patch.size == 0:
-            return None
+            return None, 0.0, 0.0
 
         total = patch.shape[0] * patch.shape[1]
 
@@ -187,7 +242,7 @@ class CameraProcessor(Processor):
         green_ratio = np.count_nonzero(green_mask) / total
 
         if red_ratio   >= self._min_color_ratio and red_ratio   > green_ratio:
-            return ObstacleColor.RED
+            return ObstacleColor.RED, red_ratio, green_ratio
         if green_ratio >= self._min_color_ratio and green_ratio > red_ratio:
-            return ObstacleColor.GREEN
-        return None
+            return ObstacleColor.GREEN, red_ratio, green_ratio
+        return None, red_ratio, green_ratio

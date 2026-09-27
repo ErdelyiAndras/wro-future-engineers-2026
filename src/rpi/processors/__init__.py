@@ -1,25 +1,25 @@
 from processors.ArduinoProcessor import ArduinoProcessor
+from processors.BodyFrameColorSampler import BodyFrameColorSampler
 from processors.CameraProcessor import (
     CameraProcessor,
     CameraExtrinsics,
     CameraIntrinsics,
-    ObstacleColorRanges
+    ObstacleColorRanges,
 )
 from processors.CollisionGuard import CollisionGuard
-from processors.DirectionDetector import DirectionDetector
-from processors.LidarProcessor import LidarProcessor
-from processors.PathPlanningProcessor import PathPlanningProcessor
-from processors.SemanticClassifier import SemanticClassifier
+from processors.PrincipalAngleDetector import PrincipalAngleDetector
+from processors.OpenSegmentPlanner import OpenSegmentPlanner
+from processors.ReactiveSegmentPlanner import ReactiveSegmentPlanner
 
 __all__ = [
     'ArduinoProcessor',
+    'BodyFrameColorSampler',
     'CameraProcessor',
     'CameraExtrinsics',
     'CameraIntrinsics',
-    'CollisionGuard',
-    'DirectionDetector',
     'ObstacleColorRanges',
-    'LidarProcessor',
-    'PathPlanningProcessor',
-    'SemanticClassifier',
+    'CollisionGuard',
+    'PrincipalAngleDetector',
+    'OpenSegmentPlanner',
+    'ReactiveSegmentPlanner',
 ]
