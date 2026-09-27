@@ -15,7 +15,7 @@ class ColorRange:
     so a hue that straddles the 0/180 seam — red, or a magenta parking wall — is
     represented as two bands rather than being clipped to one. A colour that needs no
     wrap (e.g. green) is simply one band. The same type represents every colour the
-    reactive planner cares about (red / green pillars and the parking wall), so there
+    obstacle-challenge planner cares about (red / green pillars and the parking wall), so there
     is no per-colour fixed field count to outgrow.
 
     ``bands`` is a sequence of ``(lower, upper)`` uint8 HSV arrays. Build it straight

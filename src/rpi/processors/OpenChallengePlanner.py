@@ -11,10 +11,10 @@ from control.TrackModel import TrackModel
 from utils import mm, degree, radian, Event
 
 
-class OpenSegmentPlanner(Processor):
+class OpenChallengePlanner(Processor):
     """Minimal reactive planner for the WRO FE **open challenge** (no obstacles).
 
-    A deliberately stripped-down sibling of ``ReactiveSegmentPlanner``: the open
+    A deliberately stripped-down sibling of ``ObstacleChallengePlanner``: the open
     challenge is a bare rectangular loop with no pillars, no parking, and no lane
     choices, so this planner keeps only the two things that matter:
 
@@ -25,28 +25,28 @@ class OpenSegmentPlanner(Processor):
         supplied by ``PrincipalAngleDetector`` via the shared ``TrackModel``).
 
       * **A forward turn at the wall.** When the end wall is within the corner
-        trigger, play the same *outer-lane* corner as the reactive planner — a
+        trigger, play the same *outer-lane* corner as the obstacle-challenge planner — a
         gyro-terminated forward quarter-turn to ``seg_heading + turn_sign*90`` followed
         by a closed-loop rear-wall standoff that cleans up the arc overshoot. No
         reverse-arc, no lane classification: the robot is always effectively "outer".
 
     The turn direction (``turn_sign``) is latched once, at the first corner, from the
     LiDAR opening — deferred until the opening is genuinely in view so the straight's
-    side walls can't force a wrong early pick (identical logic to the reactive planner).
+    side walls can't force a wrong early pick (identical logic to the obstacle-challenge planner).
 
     This is a **standalone duplicate**: the shared geometry / maneuver primitives
     (``_wall_distance``, ``_emit`` / ``_make_reachable``, the forward-turn +
     rear-wall step logic, ``_detect_turn_sign``) are copied here rather than inherited,
-    so the planner carries none of the reactive planner's parking / obstacle / colour
+    so the planner carries none of the obstacle-challenge planner's parking / obstacle / colour
     machinery. The corner constants are copied verbatim, so the turn matches the tuning
-    already dialed in for the reactive planner's outer maneuver. The common parts can be
+    already dialed in for the obstacle-challenge planner's outer maneuver. The common parts can be
     factored into a shared base later.
 
     Output contract is identical to every other planner (``on_target`` / ``on_stop`` /
-    ``on_debug``), and the debug payload matches ``SegmentVisualizer`` / the Recorder.
+    ``on_debug``), and the debug payload matches ``PathPlanningVisualizer`` / the Recorder.
     """
 
-    # --- Geometry / scan (identical body-point transform to the reactive planner) ---
+    # --- Geometry / scan (identical body-point transform to the obstacle-challenge planner) ---
     _OFFSET:            degree = -90.0     # sensor-frame -> body: a = wrap(scan_angle + offset)
     _R_MAX:             mm     = 3000.0    # range cap / drop beyond
 
@@ -57,7 +57,7 @@ class OpenSegmentPlanner(Processor):
     _LOOKAHEAD:         mm     = 400.0     # forward distance of the aim point on a straight
     _MAX_AIM:           radian = math.radians(40.0)   # cap on the commanded aim bearing
 
-    # --- Corner: forward turn (copied verbatim from the reactive planner's OUTER maneuver) ---
+    # --- Corner: forward turn (copied verbatim from the obstacle-challenge planner's OUTER maneuver) ---
     _TURN_ANGLE:        radian = math.radians(38.0)   # steady aim bearing during the FORWARD turn
     _TURN_LOOK:         mm     = 350.0
     _TURN_LEAD:         radian = math.radians(15.0)   # gyro-terminate this far before target (coast lands it)
@@ -70,7 +70,7 @@ class OpenSegmentPlanner(Processor):
     _FRONT_TRIGGER_CW:  mm     = 475.0
     _FRONT_TRIGGER_CCW: mm     = 550.0
 
-    # --- First-corner direction latch (copied from the reactive planner) ---
+    # --- First-corner direction latch (copied from the obstacle-challenge planner) ---
     # Comparing the +-90deg side walls only tells the turn direction once the CORNER OPENING is
     # in view; far from the corner the reading is just the straight's side walls. Defer the latch
     # until one side is clearly open (>= _TURN_OPENING_MIN AND >= _TURN_OPENING_RATIO x the other),
@@ -80,7 +80,7 @@ class OpenSegmentPlanner(Processor):
     _TURN_OPENING_RATIO: float = 2.0
     _TURN_SIGN_FORCE_DIST: mm  = 450.0
 
-    # --- Steering feasibility (same clamp as the reactive planner / firmware min-turn circle) ---
+    # --- Steering feasibility (same clamp as the obstacle-challenge planner / firmware min-turn circle) ---
     _MIN_TURN_RADIUS:   mm     = 211.0
     _TURN_RADIUS_MARGIN: float = 1.15
     _MIN_FORWARD:       mm     = 50.0
@@ -92,14 +92,14 @@ class OpenSegmentPlanner(Processor):
     _TOTAL_CORNERS:     int    = 12        # 3 laps x 4 corners
     _FINISH_STOP_DIST:  mm     = 1500.0    # after the last corner, stop this far from the end wall
 
-    # --- States (numeric values match the reactive planner so SegmentVisualizer names them) ---
+    # --- States (numeric values match the obstacle-challenge planner so PathPlanningVisualizer names them) ---
     _S_STRAIGHT = 0
     _S_CORNER   = 2
     _S_DONE     = 3
     _S_INIT     = 4
 
     _M_OUTER    = 0        # only maneuver kind here (forward turn), for the debug/visualiser
-    # Single-step corner (match the reactive planner's numbering for the visualiser's corner_step).
+    # Single-step corner (match the obstacle-challenge planner's numbering for the visualiser's corner_step).
     _STEP_TURN      = 1    # forward quarter-turn to target_heading (gyro-terminated)
 
     def __init__(
@@ -386,7 +386,7 @@ class OpenSegmentPlanner(Processor):
     def _publish_debug(
         self, a: np.ndarray, r: np.ndarray, yaw: radian, seg_heading: radian, e_head: radian,
     ) -> None:
-        # Same payload schema as ReactiveSegmentPlanner so SegmentVisualizer / the Recorder work
+        # Same payload schema as ObstacleChallengePlanner so PathPlanningVisualizer / the Recorder work
         # unchanged; the obstacle / lane / parking fields are left blank (open challenge).
         d = self._dbg
         self.on_debug({

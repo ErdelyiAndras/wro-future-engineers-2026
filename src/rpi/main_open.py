@@ -10,20 +10,20 @@ from control import EgoInformation, TrackModel
 from processors import (
     ArduinoProcessor,
     PrincipalAngleDetector,
-    OpenSegmentPlanner,
+    OpenChallengePlanner,
 )
 from recording import Recorder
 from utils import mm, degree, Point
 
-from LidarVisualizer import LidarVisualizer
-from SegmentVisualizer import SegmentVisualizer
+from visu.LidarVisualizer import LidarVisualizer
+from visu.PathPlanningVisualizer import PathPlanningVisualizer
 
 # Entry point for the OPEN CHALLENGE using the minimal segment-style planner
-# (OpenSegmentPlanner): follow the current segment's principal angle, and do a forward
+# (OpenChallengePlanner): follow the current segment's principal angle, and do a forward
 # turn when the end wall is close. No camera, no obstacles, no parking. The planner drives
 # from the raw LiDAR scan, the gyro heading, and the wheel odometry only.
 #
-# Parameters below mirror main_segment.py (wheelbase, LiDAR).
+# Parameters below mirror main_obstacle.py (wheelbase, LiDAR).
 
 _WHEELBASE:          mm     = 89.6251
 
@@ -33,7 +33,7 @@ _LIDAR_MOUNT_OFFSET: Point  = (0.0, 73.37)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description = 'Open-challenge segment planner (principal-angle follow + forward turns)')
+    parser = argparse.ArgumentParser(description = 'Open-challenge planner (principal-angle follow + forward turns)')
     parser.add_argument('--lidar-port',   default = '/dev/lidar',   help = 'LiDAR serial port')
     parser.add_argument('--arduino-port', default = '/dev/arduino', help = 'Arduino serial port')
     parser.add_argument('--button-pin',   default = 17, type = int, help = 'BCM GPIO pin for the start button')
@@ -64,7 +64,7 @@ def main():
     # first on the LiDAR thread and the planner sees a fresh theta each scan.
     angle_detector = PrincipalAngleDetector(ego_information, track)
 
-    planner = OpenSegmentPlanner(
+    planner = OpenChallengePlanner(
         ego_information,
         track,
         lidar_mount_offset = _LIDAR_MOUNT_OFFSET,
@@ -89,10 +89,10 @@ def main():
 
     visualizers: list = []
     if args.visu:
-        segment_visualizer = SegmentVisualizer()
-        segment_visualizer.start()
-        planner.on_debug += segment_visualizer.set_debug
-        visualizers.append(segment_visualizer)
+        planner_visualizer = PathPlanningVisualizer()
+        planner_visualizer.start()
+        planner.on_debug += planner_visualizer.set_debug
+        visualizers.append(planner_visualizer)
 
         lidar_visualizer = LidarVisualizer(offset_angle = _LIDAR_OFFSET_ANGLE)
         lidar_visualizer.start()

@@ -10,10 +10,10 @@ class TrackModel:
     """Thread-safe, mutable shared state describing the track as the robot
     currently understands it.
 
-    This is a blackboard in the same spirit as ``FieldMap`` / ``EgoInformation`` --
-    a lock-protected bag of state that several processors read and write -- but,
-    unlike ``FieldMap``, it holds **no maps or grids**, only the scalar track
-    descriptors the reactive stack reasons about:
+    This is a blackboard in the same spirit as ``EgoInformation`` -- a
+    lock-protected bag of state that several processors read and write -- holding
+    **no maps or grids**, only the scalar track descriptors the reactive stack
+    reasons about:
 
       * **Principal angle ``theta``** (grid orientation, mod 90 deg, absolute gyro
         frame) plus its seed status. Written by ``PrincipalAngleDetector``; every

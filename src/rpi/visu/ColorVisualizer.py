@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 import numpy as np
 
-from processors.BodyFrameColorSampler import BodyFrameColorSampler
+from processors.CameraProcessor import CameraProcessor
 
 _COLOR_RED   = (  0,   0, 220)   # BGR
 _COLOR_GREEN = (  0, 200,   0)
@@ -18,10 +18,10 @@ _COLOR_STALE = (150, 150, 150)
 
 class ColorVisualizer:
     """
-    Debug visualiser for the reactive planner's obstacle-colour detection, served as
+    Debug visualiser for the obstacle-challenge planner's obstacle-colour detection, served as
     a live JPEG stream over HTTP.
 
-    Shows the live camera frame with the most recent `BodyFrameColorSampler.color_at`
+    Shows the live camera frame with the most recent `CameraProcessor.color_at`
     query overlaid: where the LiDAR obstacle projected into the image, the HSV sample
     patch, the red/green coverage ratios, and the verdict (RED / GREEN / none). This
     is the direct check on the colour half of the obstacle pipeline — whether the
@@ -49,7 +49,7 @@ class ColorVisualizer:
 
     def __init__(
         self,
-        color_sampler: BodyFrameColorSampler,
+        color_sampler: CameraProcessor,
         *,
         port: int = _DEFAULT_PORT,
         fps:  int = 10,

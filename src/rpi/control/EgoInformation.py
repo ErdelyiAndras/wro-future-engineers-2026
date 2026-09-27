@@ -11,8 +11,6 @@ class EgoInformation:
     _INITIAL_UNCERTAINTY:  float  = 1e4
     _PROCESS_NOISE_V:      mm     = 0.2005
     _PROCESS_NOISE_W:      radian = 0.000321
-    _MEAS_NOISE_LIDAR_XY:  mm     = 753.44
-    _MEAS_NOISE_LIDAR_HDG: radian = 2.27867
     _MEAS_NOISE_IMU_HDG:   radian = 0.001
 
     def __init__(
@@ -30,17 +28,7 @@ class EgoInformation:
         )
         self._P = np.eye(3) * self._INITIAL_UNCERTAINTY
 
-        self._R_lidar   = np.diag([
-            self._MEAS_NOISE_LIDAR_XY  ** 2,
-            self._MEAS_NOISE_LIDAR_XY  ** 2,
-            self._MEAS_NOISE_LIDAR_HDG ** 2,
-        ])
         self._R_imu_hdg = self._MEAS_NOISE_IMU_HDG ** 2
-
-    def reset_ego_information(self, position: Point, yaw: radian) -> None:
-        with self._lock:
-            self._x[:] = [position[0], position[1], yaw]
-            self._P[:] = np.eye(3) * self._INITIAL_UNCERTAINTY
 
     def update_odometry(self, ds: mm, steering: radian) -> None:
         with self._lock:
@@ -76,19 +64,6 @@ class EgoInformation:
 
             self._x = np.array([x_n, y_n, self._wrap(h_n)])
             self._P = F @ self._P @ F.T + Q
-
-    def update_lidar(self, x: mm, y: mm, heading: radian) -> None:
-        with self._lock:
-            z     = np.array([x, y, heading])
-            innov = z - self._x
-            innov[2] = self._wrap(innov[2])
-
-            S = self._P + self._R_lidar
-            K = self._P @ np.linalg.inv(S)
-
-            self._x = self._x + K @ innov
-            self._x[2] = self._wrap(self._x[2])
-            self._P = (np.eye(3) - K) @ self._P
 
     def update_imu(self, heading: radian) -> None:
         with self._lock:

@@ -12,21 +12,20 @@ from components import Arduino, Camera, Lidar
 from control import EgoInformation, TrackModel, ColorRange
 from processors import (
     ArduinoProcessor,
-    BodyFrameColorSampler,
-    CollisionGuard,
+    CameraProcessor,
     PrincipalAngleDetector,
-    ReactiveSegmentPlanner,
+    ObstacleChallengePlanner,
     CameraIntrinsics,
     CameraExtrinsics,
 )
 from recording import Recorder
 from utils import mm, degree, Point
 
-from LidarVisualizer import LidarVisualizer
-from SegmentVisualizer import SegmentVisualizer
-from ColorVisualizer import ColorVisualizer
+from visu.LidarVisualizer import LidarVisualizer
+from visu.PathPlanningVisualizer import PathPlanningVisualizer
+from visu.ColorVisualizer import ColorVisualizer
 
-# Single entry point for the reactive segment planner (open + obstacle challenge).
+# Entry point for the obstacle-challenge planner.
 # The planner drives from the raw LiDAR scan, the gyro heading, and the wheel
 # odometry; the camera only supplies pillar colour via the stateless body-frame
 # sampler and is a harmless no-op when no obstacle is queried. Pass --no-camera to
@@ -84,7 +83,7 @@ def guarded(handler, name):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description = 'Reactive segment planner (open + obstacle challenge)')
+    parser = argparse.ArgumentParser(description = 'Obstacle-challenge planner')
     parser.add_argument('--lidar-port',   default = '/dev/lidar',   help = 'LiDAR serial port')
     parser.add_argument('--arduino-port', default = '/dev/arduino', help = 'Arduino serial port')
     parser.add_argument('--camera-port',  default = 0, type = int,  help = 'Camera device index')
@@ -122,10 +121,10 @@ def main():
     # Colour subsystem: the camera keeps the latest frame in the sampler; the planner
     # queries it on demand with a body-frame obstacle point. Skipped with --no-camera.
     camera:        Camera | None                = None
-    color_sampler: BodyFrameColorSampler | None = None
+    color_sampler: CameraProcessor | None = None
     if not args.no_camera:
         camera        = Camera(port = args.camera_port)
-        color_sampler = BodyFrameColorSampler(
+        color_sampler = CameraProcessor(
             intrinsics = _CAMERA_INTRINSICS,
             extrinsics = _CAMERA_EXTRINSICS,
             red        = _RED_COLOR,
@@ -139,7 +138,7 @@ def main():
     # so it runs first on the LiDAR thread and the planner sees a fresh theta each scan.
     angle_detector = PrincipalAngleDetector(ego_information, track)
 
-    planner = ReactiveSegmentPlanner(
+    planner = ObstacleChallengePlanner(
         ego_information,
         track,
         color_sampler      = color_sampler,
@@ -149,9 +148,7 @@ def main():
         park_mode          = args.park_mode,
         park_exit_side     = args.park_exit_side,
     )
-    # collision_guard = CollisionGuard(lidar_offset_angle = _LIDAR_OFFSET_ANGLE)
 
-    # lidar.on_scan += collision_guard
     lidar.on_scan += angle_detector
     lidar.on_scan += planner
 
@@ -171,10 +168,10 @@ def main():
 
     visualizers: list = []
     if args.visu:
-        segment_visualizer = SegmentVisualizer()
-        segment_visualizer.start()
-        planner.on_debug += segment_visualizer.set_debug
-        visualizers.append(segment_visualizer)
+        planner_visualizer = PathPlanningVisualizer()
+        planner_visualizer.start()
+        planner.on_debug += planner_visualizer.set_debug
+        visualizers.append(planner_visualizer)
 
         lidar_visualizer = LidarVisualizer(offset_angle = _LIDAR_OFFSET_ANGLE)
         lidar_visualizer.start()

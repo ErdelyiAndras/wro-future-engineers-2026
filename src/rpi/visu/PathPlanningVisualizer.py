@@ -6,9 +6,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-class SegmentVisualizer:
+class PathPlanningVisualizer:
     """
-    Debug visualiser for the ReactiveSegmentPlanner, served as a live SVG stream.
+    Debug visualiser for the ObstacleChallengePlanner, served as a live SVG stream.
 
     Renders the planner's per-scan state as a polar plot with the robot at the
     centre and forward pointing up (body frame: x = right = d·sin(a),
@@ -40,7 +40,7 @@ class SegmentVisualizer:
 
     Usage
     -----
-        vis = SegmentVisualizer()
+        vis = PathPlanningVisualizer()
         vis.start()
         planner.on_debug += vis.set_debug
         ...
@@ -126,7 +126,7 @@ class SegmentVisualizer:
 <html>
 <head>
 <meta charset="utf-8">
-<title>Reactive Segment Planner</title>
+<title>Path Planning Visualizer</title>
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{ background:#000; overflow:hidden; width:100vw; height:100vh;
@@ -205,10 +205,10 @@ src.onmessage = e => {{ content.innerHTML = e.data; }};
         self._server                = ThreadingHTTPServer(('0.0.0.0', self._port), _Handler)
         self._server.daemon_threads = True
         threading.Thread(target=self._server.serve_forever, daemon=True,
-                         name='SegmentVisualizer-HTTP').start()
+                         name='PathPlanningVisualizer-HTTP').start()
         threading.Thread(target=self._update_loop, daemon=True,
-                         name='SegmentVisualizer-Update').start()
-        print(f"SegmentVisualizer: http://localhost:{self._port}")
+                         name='PathPlanningVisualizer-Update').start()
+        print(f"PathPlanningVisualizer: http://localhost:{self._port}")
 
     def _update_loop(self) -> None:
         while True:

@@ -6,14 +6,14 @@ import time
 import numpy as np
 
 from processors.Processor import Processor
-from processors.BodyFrameColorSampler import BodyFrameColorSampler
+from processors.CameraProcessor import CameraProcessor
 from control.EgoInformation import EgoInformation
 from control.TrackModel import TrackModel
 from control import ObstacleColor
 from utils import mm, degree, radian, Event
 
 
-class ReactiveSegmentPlanner(Processor):
+class ObstacleChallengePlanner(Processor):
     """Deterministic, reactive, sensor-only planner for the WRO FE track.
 
     Design doc: ``docs/reactive-segment-planner.md``. Unlike the geometry-agnostic
@@ -288,7 +288,7 @@ class ReactiveSegmentPlanner(Processor):
         self,
         ego_information: EgoInformation,
         track:           TrackModel,
-        color_sampler:   BodyFrameColorSampler | None = None,
+        color_sampler:   CameraProcessor | None = None,
         lidar_mount_offset: tuple[float, float] = (0.0, 0.0),
         state_hold_s:    float = 0.0,
         start_in_parking: bool = False,
@@ -1294,7 +1294,7 @@ class ReactiveSegmentPlanner(Processor):
     ) -> None:
         # One payload per scan: the scan (body frame), the geometry the planner acted
         # on this cycle (cone, walls, aim, obstacle), and the scalar state. Consumed
-        # live by SegmentVisualizer and archived by the Recorder (attach_npz).
+        # live by PathPlanningVisualizer and archived by the Recorder (attach_npz).
         d = self._dbg
         self.on_debug({
             # scan (body frame) so the visualiser can redraw walls + cone membership

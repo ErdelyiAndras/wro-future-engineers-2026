@@ -14,7 +14,7 @@ class PrincipalAngleDetector(Processor):
     """Fits the track's principal angle ``theta`` (grid orientation, mod 90 deg) from
     each LiDAR scan and publishes it into the shared ``TrackModel``.
 
-    This is pure perception, split out of ``ReactiveSegmentPlanner`` so the planner
+    This is pure perception, split out of ``ObstacleChallengePlanner`` so the planner
     keeps no theta state of its own. The estimate is yaw-invariant: wall tangents give
     the grid orientation in the body frame, the gyro yaw lifts it into the absolute
     frame, and a circular-mean EMA on the mod-90 quantity holds it. Because ``theta``

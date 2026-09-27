@@ -1,12 +1,17 @@
 from __future__ import annotations
+
+import time
 from dataclasses import dataclass
+from threading import Lock
+
+import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
-import math
-import cv2
+
 from processors.Processor import Processor
-from control import FieldMap, EgoInformation, ObstacleColor
+from control import ColorRange, ObstacleColor
 from utils import mm, degree
+
 
 @dataclass(frozen = True)
 class CameraIntrinsics:
@@ -65,153 +70,166 @@ class CameraExtrinsics:
         return R_extra @ R_base
 
 
-@dataclass(frozen = True)
-class ObstacleColorRanges:
-    red_lower_1: np.ndarray
-    red_upper_1: np.ndarray
-    red_lower_2: np.ndarray
-    red_upper_2: np.ndarray
-    green_lower: np.ndarray
-    green_upper: np.ndarray
-
-
 class CameraProcessor(Processor):
+    """Stateless body-frame pillar-colour reader for the obstacle-challenge planner.
+
+    The planner keeps no world map, so it cannot classify obstacles by projecting a
+    world centroid through the global ego pose. Instead the planner clusters an
+    obstacle in the *current* LiDAR scan and hands its **body-frame** point straight
+    to this processor, which:
+
+      1. keeps the latest camera frame (updated on `camera.on_frame`, thread-safe);
+      2. projects the body-frame point into the image via the camera
+         intrinsics/extrinsics (the extrinsics are already body-relative, so no ego
+         pose is involved);
+      3. samples a small HSV patch and classifies it against the red / green
+         `ColorRange`s (each a union of HSV bands).
+
+    The parking wall (magenta) is a third `ColorRange`, checked whole-frame by
+    `parking_wall_ratio` for the parking-slot start.
+
+    Body-frame convention matches the planner / firmware: ``forward`` is straight
+    ahead, ``lateral`` is positive to the robot's right. This maps to the ego frame
+    as ``P_ego = [lateral, forward, 0]``: for a robot facing north (yaw 0), a point
+    to its right is due east, which the transform places at ``P_ego[0] = +lateral``
+    (camera +X, i.e. the right of the image). So a right-of-robot pillar lands
+    right-of-centre in the frame.
+    """
+
     def __init__(
         self,
-        field_map:             FieldMap,
-        ego_information:       EgoInformation,
         *,
-        intrinsics:            CameraIntrinsics,
-        extrinsics:            CameraExtrinsics,
-        obstacle_color_ranges: ObstacleColorRanges,
-        sample_radius:         int   = 20,
-        min_color_ratio:       float = 0.2,
+        intrinsics:      CameraIntrinsics,
+        extrinsics:      CameraExtrinsics,
+        red:             ColorRange,
+        green:           ColorRange,
+        parking:         ColorRange,
+        sample_radius:   int   = 20,
+        min_color_ratio: float = 0.1,
     ) -> None:
         super().__init__()
+        self._intrinsics      = intrinsics
+        self._extrinsics      = extrinsics
+        self._red             = red
+        self._green           = green
+        self._parking         = parking
+        self._sample_radius   = sample_radius
+        self._min_color_ratio = min_color_ratio
 
-        self._field_map:             FieldMap            = field_map
-        self._ego_information:       EgoInformation      = ego_information
-        self._intrinsics:            CameraIntrinsics    = intrinsics
-        self._extrinsics:            CameraExtrinsics    = extrinsics
-        self._obstacle_color_ranges: ObstacleColorRanges = obstacle_color_ranges
-        self._sample_radius:         int                 = sample_radius
-        self._min_color_ratio:       float               = min_color_ratio
+        self._lock:  Lock                 = Lock()
+        self._frame: np.ndarray | None    = None
 
-        self._frame_count: int = 0
-        self._debug_every: int = 30   # print a diagnostic line every N frames (0 = off)
-        self._save_dir:    str = 'recordings/cam_debug'  # annotated frames land here (None = off)
-        self._save_every:  int = 15   # save a frame every N frames that have an obstacle
-        self._save_cap:    int = 40   # stop after this many, so disk doesn't fill
-        self._saved:       int = 0
+        # Last color_at query, recorded for ColorVisualizer (thread-safe). None until
+        # the planner first queries a colour.
+        self._last: dict | None = None
+
+    # ------------------------------------------------------------------ #
+    #  Frame intake (camera thread)                                       #
+    # ------------------------------------------------------------------ #
 
     def _process(self, frame: np.ndarray) -> None:
-        self._frame_count += 1
-        report = self._debug_every > 0 and self._frame_count % self._debug_every == 0
+        with self._lock:
+            self._frame = frame
 
-        ego_pos, yaw = self._ego_information.get_ego_information()
-        if ego_pos is None or yaw is None:
-            if report:
-                print(f"[cam] frame {self._frame_count}: no ego pose yet")
-            return
+    # ------------------------------------------------------------------ #
+    #  Debug accessors (visualizer thread)                                #
+    # ------------------------------------------------------------------ #
 
-        ego_pos   = np.asarray(ego_pos, dtype = np.float64)
-        obstacles = self._field_map.get_obstacles()
-        if not obstacles:
-            if report:
-                print(f"[cam] frame {self._frame_count}: {frame.shape[1]}x{frame.shape[0]}, "
-                      f"0 obstacles to classify")
-            return
+    def latest_frame(self) -> np.ndarray | None:
+        with self._lock:
+            return None if self._frame is None else self._frame.copy()
+
+    def last_detection(self) -> dict | None:
+        with self._lock:
+            return None if self._last is None else dict(self._last)
+
+    # ------------------------------------------------------------------ #
+    #  Parking-wall detection (planner thread, at startup)                #
+    # ------------------------------------------------------------------ #
+
+    def parking_wall_ratio(self) -> float | None:
+        """Fraction of the current frame that is parking-wall magenta, or None if no
+        frame yet.
+
+        Used once at startup: a high ratio means the robot is boxed in the parking slot
+        (a magenta wall fills the forward view). Whole-frame, not a patch — the planner
+        only needs "is most of what I see a parking wall".
+        """
+        with self._lock:
+            frame = None if self._frame is None else self._frame
+        if frame is None:
+            return None
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        return self._parking.ratio(hsv)
+
+    # ------------------------------------------------------------------ #
+    #  Colour query (planner thread)                                      #
+    # ------------------------------------------------------------------ #
+
+    def color_at(self, forward: mm, lateral: mm) -> ObstacleColor | None:
+        """Colour of the pillar at body-frame ``(forward, lateral)``, or None.
+
+        None means either no frame yet, the point projects behind/off the image,
+        or neither colour clears the ratio threshold in the sampled patch. Every
+        call records what it saw (projection, patch ratios, verdict, status) for
+        ColorVisualizer via `last_detection`.
+        """
+        with self._lock:
+            frame = None if self._frame is None else self._frame
+
+        if frame is None:
+            self._record(forward, lateral, None, None, 0.0, 0.0, None, "no-frame")
+            return None
+
+        # Body-frame point -> ego frame the extrinsics expect (see class docstring),
+        # then into the camera frame.
+        p_ego = np.array([lateral, forward, 0.0], dtype = np.float64)
+        p_cam = self._extrinsics.R @ (p_ego - self._extrinsics.translation)
+        if p_cam[2] <= 0.0:                       # behind the camera
+            self._record(forward, lateral, None, None, 0.0, 0.0, None, "behind")
+            return None
+
+        pts, _ = cv2.projectPoints(
+            p_cam.reshape(1, 3).astype(np.float32),
+            np.zeros(3), np.zeros(3),
+            self._intrinsics.K,
+            self._intrinsics.dist_coeffs,
+        )
+        u = int(pts[0, 0, 0])
+        v = int(pts[0, 0, 1])
 
         h, w = frame.shape[:2]
-        hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        if not (0 <= u < w and 0 <= v < h):
+            self._record(forward, lateral, u, v, 0.0, 0.0, None, "off-frame")
+            return None
 
-        notes:  list[str]   = []
-        marks:  list[tuple] = []   # (u, v, in_frame, red, green, color) for annotation
-        for obs in obstacles:
-            P_cam = self._world_to_camera(obs.centroid.reshape(1, 2), ego_pos, yaw)
-            if P_cam[0, 2] <= 0:
-                notes.append("behind-camera")
-                continue
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        color, red_ratio, green_ratio = self._classify(hsv, u, v, h, w)
+        self._record(forward, lateral, u, v, red_ratio, green_ratio, color, "ok")
+        return color
 
-            pts, _ = cv2.projectPoints(
-                P_cam.astype(np.float32),
-                np.zeros(3), np.zeros(3),
-                self._intrinsics.K,
-                self._intrinsics.dist_coeffs,
-            )
-            u = int(pts[0, 0, 0])
-            v = int(pts[0, 0, 1])
-
-            if not (0 <= u < w and 0 <= v < h):
-                notes.append(f"off-frame(u={u},v={v})")
-                continue
-
-            color, red_ratio, green_ratio = self._classify_color(hsv, u, v, h, w)
-            if color is not None:
-                self._field_map.vote_obstacle_color(obs, color)
-            notes.append(f"u={u},v={v},red={red_ratio:.2f},green={green_ratio:.2f}"
-                         f"->{color.value if color else 'none'}")
-            marks.append((u, v, True, red_ratio, green_ratio, color))
-
-        if report:
-            print(f"[cam] frame {self._frame_count}: {w}x{h}, {len(obstacles)} obs | "
-                  + " ; ".join(notes))
-
-        self._save_debug_frame(frame, marks)
-
-    def _save_debug_frame(self, frame: np.ndarray, marks: list[tuple]) -> None:
-        # Write an annotated frame to disk so the camera view can be inspected
-        # offline: the sample point, the patch box, and the red/green ratios. Only
-        # every _save_every-th frame, capped, so it can't fill the disk.
-        if self._save_dir is None or self._saved >= self._save_cap:
-            return
-        if self._frame_count % self._save_every != 0:
-            return
-
-        import os
-        os.makedirs(self._save_dir, exist_ok = True)
-        img = frame.copy()
-        r   = self._sample_radius
-        for u, v, _in, red_ratio, green_ratio, color in marks:
-            hit = (0, 0, 255) if color and color.value == 'red' else \
-                  (0, 255, 0) if color and color.value == 'green' else (0, 255, 255)
-            cv2.rectangle(img, (u - r, v - r), (u + r, v + r), hit, 2)
-            cv2.drawMarker(img, (u, v), hit, cv2.MARKER_CROSS, 16, 2)
-            cv2.putText(img, f"R{red_ratio:.2f} G{green_ratio:.2f} {color.value if color else 'none'}",
-                        (max(0, u - 60), max(15, v - r - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, hit, 1, cv2.LINE_AA)
-        cv2.putText(img, f"frame {self._frame_count}", (8, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-        path = f"{self._save_dir}/frame_{self._frame_count:05d}.jpg"
-        if cv2.imwrite(path, img):
-            self._saved += 1
-
-    def _world_to_camera(
+    def _record(
         self,
-        world_points: np.ndarray,
-        ego_pos:      np.ndarray,
-        yaw:          float,
-    ) -> np.ndarray:
-        cos_yaw = math.cos(yaw)
-        sin_yaw = math.sin(yaw)
+        forward: mm, lateral: mm,
+        u: int | None, v: int | None,
+        red_ratio: float, green_ratio: float,
+        color: ObstacleColor | None, status: str,
+    ) -> None:
+        with self._lock:
+            self._last = {
+                "t":       time.monotonic(),
+                "forward": float(forward),
+                "lateral": float(lateral),
+                "u":       u,
+                "v":       v,
+                "red":     float(red_ratio),
+                "green":   float(green_ratio),
+                "color":   None if color is None else color.value,
+                "status":  status,
+                "radius":  self._sample_radius,
+            }
 
-        R_w2e = np.array([
-            [ cos_yaw, -sin_yaw],
-            [ sin_yaw,  cos_yaw],
-        ])
-
-        d_xy     = world_points - ego_pos[[1, 0]]
-        P_ego_xy = (R_w2e @ d_xy.T).T
-
-        N     = len(world_points)
-        P_ego = np.column_stack([P_ego_xy, np.zeros(N)])
-
-        P_rel = P_ego - self._extrinsics.translation
-        P_cam = (self._extrinsics.R @ P_rel.T).T
-
-        return P_cam
-
-    def _classify_color(
+    def _classify(
         self,
         hsv: np.ndarray,
         u:   int,
@@ -220,26 +238,14 @@ class CameraProcessor(Processor):
         w:   int,
     ) -> tuple[ObstacleColor | None, float, float]:
         r     = self._sample_radius
-        patch = hsv[
-            max(0, v - r) : min(h, v + r),
-            max(0, u - r) : min(w, u + r),
-        ]
+        patch = hsv[max(0, v - r):min(h, v + r), max(0, u - r):min(w, u + r)]
         if patch.size == 0:
             return None, 0.0, 0.0
 
         total = patch.shape[0] * patch.shape[1]
 
-        red_mask = (
-            cv2.inRange(patch, self._obstacle_color_ranges.red_lower_1,
-                               self._obstacle_color_ranges.red_upper_1) |
-            cv2.inRange(patch, self._obstacle_color_ranges.red_lower_2,
-                               self._obstacle_color_ranges.red_upper_2)
-        )
-        green_mask = cv2.inRange(patch, self._obstacle_color_ranges.green_lower,
-                                        self._obstacle_color_ranges.green_upper)
-
-        red_ratio   = np.count_nonzero(red_mask)   / total
-        green_ratio = np.count_nonzero(green_mask) / total
+        red_ratio   = np.count_nonzero(self._red.mask(patch))   / total
+        green_ratio = np.count_nonzero(self._green.mask(patch)) / total
 
         if red_ratio   >= self._min_color_ratio and red_ratio   > green_ratio:
             return ObstacleColor.RED, red_ratio, green_ratio
