@@ -247,7 +247,7 @@ class ObstacleChallengePlanner(Processor):
     _PK_REVERSE_OUT = 2
 
     # --- Laps / finish ---
-    _TOTAL_CORNERS:     int    = 4        # 3 laps x 4 corners
+    _TOTAL_CORNERS:     int    = 12        # 3 laps x 4 corners
     _FINISH_TOL:        mm     = 120.0     # PARKING modes: stop when the end-wall distance returns to within this of start
     # NON-parking (park_mode "none"): stop a fixed distance from the end wall ahead, so the robot
     # halts near the CENTRE of the start straight regardless of where the run began. The old
