@@ -1,0 +1,132 @@
+@startuml class-diagram
+' Team Bits — WRO Future Engineers 2026
+' Key classes of the Raspberry Pi software and how they relate.
+' Render at https://www.plantuml.com/plantuml  ->  figures/software/class-diagram.svg
+
+title Class Diagram — Raspberry Pi Software (key types)
+
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+hide empty members
+
+' ------------------------------------------------------------------ '
+'  Event glue                                                         '
+' ------------------------------------------------------------------ '
+class Event {
+  +__iadd__(handler)
+  +__isub__(handler)
+  +__call__(*args)
+}
+
+' ------------------------------------------------------------------ '
+'  Components (hardware drivers)                                      '
+' ------------------------------------------------------------------ '
+abstract class Component {
+  +start()
+  +stop()
+  #_setup()
+  #_teardown()
+  #_run()
+}
+class Lidar {
+  +on_scan : Event
+}
+class Camera {
+  +on_frame : Event
+}
+class Arduino {
+  +on_state : Event
+  +set_target(fwd, lat, speed)
+  +stop()
+}
+Component <|-- Lidar
+Component <|-- Camera
+Component <|-- Arduino
+Lidar   *-- Event
+Camera  *-- Event
+Arduino *-- Event
+
+' ------------------------------------------------------------------ '
+'  Processors (algorithms)                                           '
+' ------------------------------------------------------------------ '
+abstract class Processor {
+  +__call__(*args)
+  #_process(*args)
+}
+class ArduinoProcessor
+class CameraProcessor {
+  +color_at(fwd, lat) : ObstacleColor?
+  +parking_wall_ratio() : float?
+}
+class PrincipalAngleDetector
+class OpenChallengePlanner {
+  +on_target : Event
+  +on_stop : Event
+  +on_debug : Event
+}
+class ObstacleChallengePlanner {
+  +on_target : Event
+  +on_stop : Event
+  +on_debug : Event
+}
+Processor <|-- ArduinoProcessor
+Processor <|-- CameraProcessor
+Processor <|-- PrincipalAngleDetector
+Processor <|-- OpenChallengePlanner
+Processor <|-- ObstacleChallengePlanner
+
+' ------------------------------------------------------------------ '
+'  Control / blackboard                                              '
+' ------------------------------------------------------------------ '
+class EgoInformation {
+  -x, y, heading (EKF)
+  +update_odometry(ds, steering)
+  +update_imu(heading)
+  +yaw : radian
+  +position : Point
+}
+class TrackModel {
+  +theta : radian
+  +seg_k, turn_sign, corner_count
+  +current_lane, target_offset
+  +segment_heading(yaw)
+}
+class ColorRange {
+  +bands
+  +mask(hsv)
+  +ratio(hsv)
+}
+enum ObstacleColor {
+  RED
+  GREEN
+}
+class CameraIntrinsics
+class CameraExtrinsics
+
+' ------------------------------------------------------------------ '
+'  Relationships                                                     '
+' ------------------------------------------------------------------ '
+ArduinoProcessor --> EgoInformation : updates
+PrincipalAngleDetector --> EgoInformation : reads yaw
+PrincipalAngleDetector --> TrackModel : writes theta
+ObstacleChallengePlanner --> EgoInformation : reads pose
+ObstacleChallengePlanner --> TrackModel : reads/writes
+ObstacleChallengePlanner --> CameraProcessor : color_at()
+OpenChallengePlanner --> EgoInformation
+OpenChallengePlanner --> TrackModel
+CameraProcessor --> ColorRange : matches
+CameraProcessor --> CameraIntrinsics
+CameraProcessor --> CameraExtrinsics
+CameraProcessor ..> ObstacleColor : returns
+
+' ------------------------------------------------------------------ '
+'  Recording                                                         '
+' ------------------------------------------------------------------ '
+class Recorder {
+  +attach_scan() / attach_array() / attach_npz()
+  +create_default()
+}
+Recorder ..> Event : taps
+Recorder ..> EgoInformation : samples pose
+
+@enduml

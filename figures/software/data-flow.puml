@@ -1,0 +1,49 @@
+@startuml data-flow
+' Team Bits — WRO Future Engineers 2026
+' One control cycle: sensors -> blackboard -> planner -> firmware -> actuators, with the
+' STATE feedback closing the loop.
+' Render at https://www.plantuml.com/plantuml  ->  figures/software/data-flow.svg
+
+title Data Flow — one control cycle
+
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #33668E
+skinparam rectangle {
+  BackgroundColor #F2F6FA
+  BorderColor #33668E
+}
+
+rectangle "LiDAR\nscan" as scan #E8F0D8
+rectangle "Camera\nframe" as cam #E8F0D8
+rectangle "PrincipalAngleDetector" as pad
+rectangle "CameraProcessor\ncolor_at()" as cp
+rectangle "TrackModel\ntheta / lane / corners" as tm #FBF3D8
+rectangle "EgoInformation\nEKF pose / yaw" as ego #FBF3D8
+rectangle "Planner\n(Open / Obstacle)" as plan
+rectangle "on_target\n(fwd, lat, speed)" as tgt
+rectangle "Navigator\npure-pursuit + heading PID" as nav #F5E2E2
+rectangle "Motor + Steering" as act #F5E2E2
+rectangle "STATE @ 50 Hz\nheading + distance" as state #F5E2E2
+
+scan --> pad : on_scan
+pad  --> tm  : writes theta
+scan --> plan : on_scan
+tm   --> plan : reads
+ego  --> plan : reads yaw / pos
+cam  --> cp   : on_frame
+plan ..> cp   : queries colour
+cp   ..> plan : RED / GREEN
+
+plan --> tgt
+tgt  --> nav  : serial (Pi -> Nano)
+nav  --> act
+
+nav   --> state
+state --> ego : ArduinoProcessor\n(EKF update)
+
+legend bottom
+  green = sensors  |  yellow = blackboard  |  red = Arduino firmware
+endlegend
+
+@enduml

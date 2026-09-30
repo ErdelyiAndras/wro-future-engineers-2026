@@ -1,0 +1,70 @@
+@startuml state-machine
+' Team Bits — WRO Future Engineers 2026
+' State machine of the ObstacleChallengePlanner (the OpenChallengePlanner is the same
+' minus SWITCH and the parking states). One LiDAR scan = one tick of this machine.
+' Render at https://www.plantuml.com/plantuml  ->  figures/software/state-machine.svg
+
+title General Algorithm — Planner State Machine (per LiDAR scan)
+
+skinparam shadowing false
+skinparam state {
+  BackgroundColor #F2F6FA
+  BorderColor #33668E
+  ArrowColor #33668E
+}
+
+[*] --> INIT
+
+state "INIT" as INIT : wait for theta seed,\nthen branch on start pose
+state "PARK_LEAVE" as LEAVE {
+  [*] --> K1 : K-turn to face inner wall
+  K1 --> A1 : APPROACH inner-wall standoff
+  A1 --> R1 : REVERSE-OUT to segment heading
+  R1 --> [*]
+}
+state "PARK_SETTLE" as SETTLE : dwell, read pillar colour\non motion-free frames
+
+state "DRIVE_STRAIGHT" as STRAIGHT : gyro holds segment heading;\nlateral dead-reckoned;\nsplit end wall vs pillar
+state "LANE_SWITCH" as SWITCH : drive beside the pillar\ninto the mandated lane\n(corner trigger disabled)
+
+state "CORNER" as CORNER {
+  [*] --> OUTER : outer lane
+  [*] --> REVARC : centre / inner lane
+  OUTER  : forward quarter-turn
+  REVARC : reverse-arc turn
+  OUTER  --> ALIGN
+  REVARC --> ALIGN
+  ALIGN  : rear-wall standoff +\nheading align (closed loop)
+  ALIGN  --> [*]
+}
+
+state "FINAL PARK" as PARK : perpendicular park\n(K-turn -> drive in between walls)
+state DONE
+
+INIT --> STRAIGHT : normal start
+INIT --> LEAVE    : start_in_parking\n(exit side voted)
+
+LEAVE  --> SETTLE   : exited & aligned
+SETTLE --> STRAIGHT : dwell done
+
+STRAIGHT --> SWITCH : obstacle mandates\na different lane
+SWITCH   --> STRAIGHT : lane reached
+
+STRAIGHT --> CORNER : end wall within\nfront trigger
+CORNER   --> STRAIGHT : corner_count += 1\n(grid line advanced)
+
+STRAIGHT --> DONE : last corner passed,\nstop point reached\n(park_mode = none)
+SWITCH   --> DONE : finish mid-switch\n(park_mode = none)
+STRAIGHT --> PARK : stop point reached\n(park_mode set)
+PARK --> DONE
+
+DONE --> [*] : on_stop()
+
+note right of STRAIGHT
+  Turn direction (turn_sign) is latched
+  once, at the first corner, from the
+  LiDAR opening. Arrival lane (outer /
+  centre / inner) selects the CORNER recipe.
+end note
+
+@enduml

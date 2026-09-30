@@ -1,0 +1,104 @@
+@startuml architecture-package
+' Team Bits — WRO Future Engineers 2026
+' High-level software architecture: two processors, event-driven blackboard on the Pi,
+' framed serial link to the Arduino firmware.
+' Render at https://www.plantuml.com/plantuml  ->  figures/software/architecture-package.svg
+
+title Software Architecture — Package / Component View
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #33668E
+skinparam packageBackgroundColor #F7F9FB
+
+node "Raspberry Pi 5  (Python, background threads)" as PI {
+
+  package "components  (hardware drivers)" as COMP {
+    [Lidar]   as LIDAR
+    [Camera]  as CAM
+    [Arduino] as ARD
+    note bottom of LIDAR : each is a threaded Component\nthat fires an Event on new data
+  }
+
+  package "processors  (algorithms)" as PROC {
+    [PrincipalAngleDetector] as PAD
+    [ArduinoProcessor]       as AP
+    [CameraProcessor]        as CP
+    [OpenChallengePlanner]   as OCP
+    [ObstacleChallengePlanner] as OBP
+  }
+
+  package "control  (blackboard state)" as CTRL {
+    [EgoInformation\n(EKF pose / yaw)] as EGO
+    [TrackModel\n(theta, lane, corners)] as TM
+    [ColorRange / ObstacleColor] as COL
+  }
+
+  package "recording" as REC {
+    [Recorder] as RECORDER
+  }
+
+  package "visu  (live HTTP/SVG)" as VIS {
+    [LidarVisualizer :8082]
+    [PathPlanningVisualizer :8084]
+    [ColorVisualizer :8085]
+  }
+}
+
+node "Arduino Nano  (C++, >=50 Hz loop)" as NANO {
+  [Protocol\n(framed UART)] as PROTO
+  [Navigator\n(pure-pursuit + heading PID)] as NAV
+  [Motor]    as MOT
+  [Steering] as STE
+  [Encoder]  as ENC
+  [IMU (BNO055)] as IMU
+}
+
+' --- sensors / actuators ---
+cloud "RPLIDAR A2M8" as HW_LIDAR
+cloud "USB camera"    as HW_CAM
+cloud "BNO055"        as HW_IMU
+cloud "wheel encoder" as HW_ENC
+cloud "DC motor"      as HW_MOT
+cloud "steering servo" as HW_SERVO
+
+HW_LIDAR --> LIDAR
+HW_CAM   --> CAM
+HW_IMU   --> IMU
+HW_ENC   --> ENC
+MOT      --> HW_MOT
+STE      --> HW_SERVO
+
+' --- event wiring on the Pi (on_scan / on_frame / on_state) ---
+LIDAR --> PAD  : on_scan
+LIDAR --> OBP  : on_scan
+LIDAR --> OCP  : on_scan
+CAM   --> CP   : on_frame
+ARD   --> AP   : on_state
+
+PAD --> TM  : writes theta
+AP  --> EGO : odometry + IMU update
+OBP --> TM  : reads/writes lane, corners
+OBP ..> EGO : reads yaw / pos
+OBP ..> CP  : color_at(obstacle)
+CP  ..> COL : HSV match
+
+OBP --> ARD : on_target -> set_target
+OCP --> ARD : on_target -> set_target
+
+LIDAR ..> RECORDER : taps
+OBP   ..> RECORDER : on_debug / on_target
+OBP   ..> VIS      : on_debug
+
+' --- serial link ---
+ARD -down-> PROTO : SET_TARGET / STOP  (USB serial, 115200)
+PROTO -up-> ARD   : STATE @ 50 Hz
+
+PROTO --> NAV
+ENC --> NAV
+IMU --> NAV
+NAV --> MOT
+NAV --> STE
+
+@enduml
