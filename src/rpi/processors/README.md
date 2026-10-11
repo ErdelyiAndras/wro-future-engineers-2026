@@ -84,7 +84,7 @@ version below; `OpenChallengePlanner` is the same minus `LANE_SWITCH` and the pa
 | `CORNER` | play a scripted, arrival-lane-specific recipe (below) |
 | `PARK_LEAVE` | 3-step maneuver out of the parking slot: K-turn → approach inner wall → reverse-out to the segment |
 | `PARK_SETTLE` | dwell, reading the first pillar's colour on motion-free frames before driving |
-| `PARK` | final parking at the end of the run (`--park-mode perpendicular`) |
+| `PARK` | final parking at the end of the run (`--park-mode perpendicular` / `parallel`) |
 | `DONE` | stopped (`on_stop()` fired) |
 
 ### Straights and the sticky lane
@@ -134,9 +134,11 @@ actually reached.
 ### Parking
 
 `main_obstacle.py` supports a parking-slot **start** (`--parking-start`, plays the
-`PARK_LEAVE` maneuver) and a final **park** (`--park-mode perpendicular`: K-turn to face the
-outer wall, then drive in between the two parking walls and stop when flanked, with a hard
-wall-clock timeout so a stall can never loop). The parallel-parking variants are stubs.
+`PARK_LEAVE` maneuver) and a final **park** (`--park-mode`). Both park modes start the same
+way: a reverse arc to face the inner wall, then a straight reverse into the slot until the
+inner wall is `_PARK_BACK_FRONT` away (flank / distance / wall-clock backstops so a stall can
+never loop). `perpendicular` stops there, perpendicular in the slot; `parallel` then
+K-turns back to parallel with the segment (the slot-leave maneuver played in reverse).
 
 ## `OpenChallengePlanner` — [`OpenChallengePlanner.py`](OpenChallengePlanner.py)
 
