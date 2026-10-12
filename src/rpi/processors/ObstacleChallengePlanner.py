@@ -93,8 +93,15 @@ class ObstacleChallengePlanner(Processor):
     # one flank (returns stay near ~cluster range there), so it fails and is rejected. Scan-domain,
     # so it needs no alignment / lat_dr / colour. Only in the start straight (elsewhere a pillar may
     # legitimately sit near a side wall).
+    # The flank window must be NARROW: rays beside a pillar often return nothing (beyond _R_MAX), and a
+    # 45deg window then reached the side wall ~37deg away and called the pillar wall-attached
+    # (run_005259/005346: pillar ~550mm ahead from the settle state, not detected until ~330mm).
+    # Narrowed, a parking wall can also pass when the rays toward the outer wall drop out, so a size
+    # cap backs it up: a pillar is 50x50 (cluster span < ~80mm), a parking wall's visible span is
+    # 150-190mm. Checked on 30 runs: 0 parking walls accepted, pillar seen from the first settle scan.
     _OBSTACLE_GAP:       mm     = 300.0    # depth step (farther) that counts as open space on a flank
-    _OBSTACLE_FLANK_WIN: radian = math.radians(45.0)   # bearing window just outside the cluster edge
+    _OBSTACLE_FLANK_WIN: radian = math.radians(15.0)   # bearing window just outside the cluster edge
+    _OBSTACLE_MAX_EXTENT: mm    = 120.0    # cluster span at/above this = a wall, not a pillar
     # Obstacle-colour memory: a pillar's colour is stored the first time it is confidently read
     # (lap 1), keyed by (segment = corner_count % 4, longitudinal distance from that segment's END
     # wall via LiDAR). On later laps a re-detected pillar within this tolerance recalls the stored
@@ -109,7 +116,13 @@ class ObstacleChallengePlanner(Processor):
     # sits against the outer (perimeter) wall, so the OUTER lane is pulled this much toward
     # centre to clear the magenta parking barriers. Applied only to the outer lane there;
     # centre/inner untouched. MUST be < _LANE_OFFSET (else the lane sign is lost). 0 = off.
-    _PARKING_LANE_SHIFT: mm    = 220.0
+    _PARKING_LANE_SHIFT: mm    = 190.0
+    # Lateral re-anchor after a parking start (see _lateral_fix): the slot-leave does NOT end on the
+    # centre line (CW: 35-107mm toward the outer wall, CCW up to ~100mm; run_222909 drove the outer
+    # lane ~50mm too close to the outer wall). On the first start-straight scan where both side walls
+    # read and add up to the corridor width, lat_dr is set from the LiDAR: (left - right) / 2.
+    _CORRIDOR_WIDTH:    mm     = 1000.0
+    _LAT_FIX_TOL:       mm     = 60.0      # |left + right - _CORRIDOR_WIDTH| <= this = clean wall pair
     # Lane switch: the target point handed to the firmware is the pillar's forward
     # (longitudinal) distance paired with the mandated lane's lateral position, so pure
     # pursuit brings the robot into the lane right beside the pillar, on the correct
@@ -190,9 +203,31 @@ class ObstacleChallengePlanner(Processor):
     #                   _PARK_PERP_LEAD before 90.
     #   2 APPROACH    — drive forward/back to sit _PARK_INNER_STANDOFF_{CW,CCW} from the inner wall (LiDAR).
     #   3 REVERSE_OUT — reverse-turn back to the segment heading, then hand to DRIVE_STRAIGHT.
+    # Two straight reverses wrap the reverse turn (see _park_sequence), per direction:
+    #   KTURN -> APPROACH -> BACK_PRE (hold perp) -> REVERSE_OUT -> BACK_POST (hold seg).
+    # BACK_POST backs the robot up the track, away from a pillar close ahead of the slot, so the
+    # PARK_SETTLE colour read and the first lane switch have room. A 0 distance skips that reverse.
     _PARK_KTURN_STEER:   radian = math.radians(38.0)   # leg steer magnitude (aim toward the turn side)
     _PARK_KTURN_FWD_LEG: mm     = 180.0    # nominal FORWARD-leg travel (primary leg-end); <= fore clearance
     _PARK_KTURN_REV_LEG: mm     = 40.0    # nominal REVERSE-leg travel — smaller so the reverse moves less
+    # FINAL-park K-turn (parallel STRAIGHTEN) uses SHORTER legs than the
+    # slot-leave: the end slot is tight, so long legs swing the nose/tail into the parking walls
+    # (run_173210 touched the walls). Smaller than the leave's 180/40, but KEEP the reverse-dominant
+    # ratio (fwd_leg > rev_leg): in the inverted STRAIGHTEN the long leg is the REVERSE one, which
+    # drifts the robot INTO the slot. Equal legs (70/70) lost that tuck-in and it drifted OUT (run_174542).
+    _PARK_END_KTURN_FWD_LEG: mm = 90.0
+    _PARK_END_KTURN_REV_LEG: mm = 40.0
+    # Wall-proximity early-out for the FINAL-park K-turns (larger than the leave's _PARK_KTURN_CLEAR,
+    # which stays small so the boxed slot-leave can escape). The LiDAR is ~160mm ahead of the TAIL, so
+    # a reverse leg that stopped at the leave's 150 put the tail ~29mm THROUGH the rear wall and tipped
+    # it (run_131140). With the _PARK_KTURN_MIN(50) overshoot, tail clearance ~= CLEAR - 50 - 160, so
+    # 250 leaves ~40mm worst-case. Shared by the forward (nose) check too.
+    _PARK_END_KTURN_CLEAR: mm = 100.0
+    # parallel-park STRAIGHTEN final heading: this far PAST parallel toward the OUTER/perimeter wall
+    # (nose tilted toward the outer wall). 0 = parallel to the segment (parks IN the slot). WARNING:
+    # positive rotates PAST parallel, swinging the tail inward and walking the robot OUT of the bay
+    # (run_174542 at 30deg stopped way outside) — set small and test. This is the "final facing" knob.
+    _PARK_STRAIGHTEN_OUT_BIAS: radian = math.radians(10.0)
     _PARK_KTURN_MIN:     mm     = 50.0     # min travel before a wall-proximity early-out (anti-deadlock)
     # Exit-side (turn direction) decision for a parking start. The side is inherently ambiguous
     # from one scan — both sides of a parallel slot are drivable, and a lone spurious return on the
@@ -201,6 +236,10 @@ class ObstacleChallengePlanner(Processor):
     # scans and commit the majority, instead of latching the first frame.
     _PARK_EXIT_VOTES:    int    = 5
     _PARK_KTURN_CLEAR:   mm     = 150.0    # end a leg early (after MIN) if a wall is this near ahead/behind
+    # A K-turn wall reading counts only with at least this many rays in the +-30deg window. Up close the
+    # wall drops out of the LiDAR and the window keeps 0-3 stray rays (a meaningless "far" median); real
+    # readings — the wall, or open track once the robot turned away — had 5+ (runs 150338, 203536).
+    _PARK_KTURN_WALL_RAYS: int  = 5
     _PARK_PERP_LEAD:     radian = math.radians(15.0)   # stop the K-turn this far before 90deg (coast)
     # Inner-wall standoff (the "front-trigger distance" approached before the reverse-turn-out),
     # split by track direction: the following reverse arc turns left for CCW / right for CW, and the
@@ -212,27 +251,45 @@ class ObstacleChallengePlanner(Processor):
     _PARK_OUT_ANGLE:     radian = math.radians(38.0)   # reverse-turn arc tightness (step 3)
     _PARK_OUT_LEAD:      radian = math.radians(22.0)    # stop the reverse-turn this far before the segment heading
     _PARK_OUT_MAX:       mm     = 500.0    # reverse-turn travel cap
-    _SPEED_PARK:         float  = 80.0
+    _PARK_LEAVE_BACK_PRE_CCW:  mm = 50.0  # CCW: straight reverse after APPROACH, before the reverse turn
+    _PARK_LEAVE_BACK_POST_CCW: mm = 200.0  # CCW: straight reverse after the reverse turn (facing seg)
+    _PARK_LEAVE_BACK_PRE_CW:   mm = 10.0   # CW: straight reverse after APPROACH, before the reverse turn
+    _PARK_LEAVE_BACK_POST_CW:  mm = 0.0   # CW: straight reverse after the reverse turn (facing seg)
+    # Backstop for those straight reverses: end early if the wall behind is this close (LiDAR range;
+    # the tail is ~160mm behind the LiDAR, so 250 leaves ~90mm). 0 / unset distance = step skipped.
+    _PARK_LEAVE_BACK_CLEAR:    mm = 250.0
+    _SPEED_PARK:         float  = 80.0   # slot-LEAVE maneuver speed (start-of-run exit)
+    _SPEED_PARK_END:     float  = 65.0   # FINAL park maneuver speed (end of run: perpendicular / parallel)
     # After the exit (robot aligned with the segment) dwell stopped this long, sampling the
     # obstacle ahead, so its colour is read on clean motion-free frames (vote buffer fills,
     # camera settles, theta re-converges) before driving. 0 = no dwell.
     _PARK_SETTLE_S:      float  = 0.5
 
     # --- Final parking (end of run; park_mode selects the maneuver, closed-loop on the walls) ---
-    # At the finish (back at the slot) the robot parks into the bay instead of just stopping.
-    # PERPENDICULAR: turn 90deg to face the OUTER/perimeter wall, then drive in between the two
-    # parking walls and STOP as soon as both flank the robot (it is between them). It does NOT drive
-    # to / push toward the outer wall: the outer wall drops below the LiDAR min range up close, and a
-    # forward push metered by the encoder loops forever if the robot stalls against the wall (the
-    # run_20260913_153744 crash). A wall-clock timeout is the hard backstop so a stall can never loop.
-    # Centres on left-right the whole time. (Parallel variants to come.) Reuses `_kturn_toward`.
-    _PARK_IN_STANDOFF:   mm     = 180.0    # stop this far from the outer wall (dead ahead when facing it); >
-                                           # LiDAR min range, so it is still rangeable at the stop
-    _PARK_IN_LOST_MARGIN: mm    = 150.0    # if the outer wall (front) is LOST after being within standoff+this,
-                                           # treat as "at the wall" and stop (handles it vanishing up close)
-    _PARK_IN_FLANK_MAX:  mm     = 250.0    # (alternate seat) both parking walls within this = flanked
-    _PARK_IN_MAX:        mm     = 700.0    # drive-in distance cap (backstop; also stops a stall via odometry)
-    _PARK_IN_TIMEOUT:    float  = 2.5      # HARD wall-clock cap on the drive-in (s) — stall-proof
+    # At the finish (back at the slot) the robot parks into the bay instead of just stopping. Both modes
+    # share the same first two steps (see _park_mirror): REV_ARC (reverse arc to face the inner wall)
+    # then BACK_IN (reverse into the slot).
+    # PARALLEL: the slot-LEAVE maneuver run in reverse — then STRAIGHTEN (K-turn back to
+    # parallel with the segment).
+    # PERPENDICULAR: stops after BACK_IN, left perpendicular in the slot (nose to the inner wall).
+    _PARK_IN_FLANK_MAX:  mm     = 250.0    # (backstop seat) both parking walls within this = flanked
+    # BACK_IN (final-park step 1, both modes) reverses the WHOLE track width into the slot, facing
+    # the inner wall — so the OUTER wall is directly behind (bearing 180deg) and is the seat reference
+    # (the +-90deg flank sees the far side walls during the approach, not the parking walls). It needs
+    # a big distance / time budget.
+    # BACK_IN seats when the INNER wall (dead ahead while facing perp) is at least this far: the robot
+    # has then reversed the slot depth into the bay. The inner wall is far and always cleanly rangeable,
+    # so it is far more robust than the near outer wall (which drops below the LiDAR min range up close
+    # and is offset by the ~173mm LiDAR-to-tail distance). A fixed constant because the field dimensions
+    # are standard; this is the primary depth tuning knob (larger => stops shallower, more rotation room).
+    _PARK_BACK_FRONT:    mm     = 715.0
+    # HARD safety floor on the wall BEHIND: if _PARK_BACK_FRONT is set larger than the corridor allows
+    # (front can only grow to ~width - this), the inner-wall seat is unreachable and the robot reverses
+    # into the outer wall (run_164406: front capped at 815, tail touching at rear=181). Seat as soon as
+    # the rear wall is this close so the tail (~173mm behind the rear beam) can never hit it.
+    _PARK_BACK_REAR_MIN: mm     = 0.0
+    _PARK_BACK_MAX:      mm     = 1200.0   # distance-cap backstop for the long cross-track reverse
+    _PARK_BACK_TIMEOUT:  float  = 6.0      # wall-clock backstop (s) for the long reverse
     # Anti-clip: while driving in, steer AWAY from a side parking wall only when it is genuinely
     # CLOSE (< _PARK_SIDE_MIN), by a proportional amount capped at _PARK_AVOID_MAX. Unlike a
     # "centre-between" term this reacts only to a near wall, so a far/open reading can't saturate it
@@ -240,11 +297,36 @@ class ObstacleChallengePlanner(Processor):
     _PARK_SIDE_MIN:      mm     = 140.0    # a side wall this near => nudge away from it
     _PARK_AVOID_GAIN:    float  = 0.006    # rad per mm inside _PARK_SIDE_MIN
     _PARK_AVOID_MAX:     radian = math.radians(28.0)   # cap on the avoid nudge
+    # How far (end-wall distance) BEFORE the slot the final-park maneuver STARTS, relative to the slot
+    # (_d_front_start = the end-wall distance of the pose the run STARTED in — for a parking start it is
+    # corrected for the leave's along-track travel, see _drive_straight). The REV_ARC backs the robot ~a turn-radius AWAY from the
+    # end wall as it rotates to perpendicular, and BACK_IN then moves mostly laterally — so to land the
+    # park at the slot the arc must begin PAST the slot (smaller d_front => a negative value). Larger =>
+    # the arc starts sooner / farther from the end wall. (parallel/perpendicular modes; "none" is separate.)
+    # Split by turn direction: the arc curves toward the inner wall (perp = seg + turn_sign*90), so the
+    # geometry — and thus the lead distance — differs between CCW (turn_sign -1) and CW (turn_sign +1).
+    # Converted when the reference moved from the post-leave pose to the slot pose (2026-10-11): old
+    # -440 / -360 minus the average leave travel of the good runs (CCW -350mm, CW -175mm), so the
+    # arc point is unchanged for those runs.
+    _PARK_ARC_START_AHEAD_CCW: mm = -90.0
+    _PARK_ARC_START_AHEAD_CW:  mm = -220.0
+    # Approach slow-down (parking modes, after the last corner): within _PARK_SLOWDOWN_DIST of the
+    # arc-start point the drive speed ramps linearly from its normal value down to
+    # _PARK_SLOWDOWN_MIN_SPEED at the arc start, so the maneuver begins from a slow, repeatable speed.
+    # Below the firmware MIN_SPEED (80) works while already moving (the kickstart only applies from rest).
+    _PARK_SLOWDOWN_DIST:      mm    = 200.0
+    _PARK_SLOWDOWN_MIN_SPEED: float = 65.0
+    # Final-pass pillar cutoff (_past_park_cutoff): pillars beyond the arc-start point are ignored, but
+    # only if they are more than this PAST it — the nose sits ahead of the LiDAR, so a pillar just past
+    # the arc start would still be reached. NOT a measured value: set to LiDAR-to-nose + clearance.
+    _PARK_CUTOFF_NOSE_MARGIN: mm    = 150.0
 
     # Parking-leave sub-steps (recorded as corner_step during _S_PARK_LEAVE).
     _PK_KTURN       = 0
     _PK_APPROACH    = 1
     _PK_REVERSE_OUT = 2
+    _PK_BACK_PRE    = 3   # straight reverse holding perp (before REVERSE_OUT)
+    _PK_BACK_POST   = 4   # straight reverse holding seg  (after REVERSE_OUT)
 
     # --- Laps / finish ---
     _TOTAL_CORNERS:     int    = 12        # 3 laps x 4 corners
@@ -254,6 +336,17 @@ class ObstacleChallengePlanner(Processor):
     # start-relative trigger fired too early when the run started near the segment's entry line
     # (d_front_start was ~the whole segment), so the robot never actually entered the end segment.
     _FINISH_STOP_DIST:  mm     = 1500.0
+    # Finish-trigger filtering (both modes). d_front is the 85th percentile of a sparse forward cone, so
+    # one scan where parking walls / a pillar fill the cone reads far too short (run_20261010_210715:
+    # 2578 -> 890 -> 2354, park started in the corner square). Two guards:
+    #   jump check — reject a reading that DROPS more than the odometry travel since the last accepted
+    #                reading + _FINISH_JUMP_TOL. After _FINISH_JUMP_RESET consecutive rejections the new
+    #                level is accepted (a persistent drop is real; also stops a stale-high reference
+    #                from locking the finish out forever).
+    #   debounce   — the stop condition must hold on _FINISH_DEBOUNCE consecutive accepted scans.
+    _FINISH_JUMP_TOL:   mm     = 150.0
+    _FINISH_JUMP_RESET: int    = 3
+    _FINISH_DEBOUNCE:   int    = 3
 
     # --- Steering feasibility (same clamp as FTG / TrackPathPlanner) ---
     _MIN_TURN_RADIUS:   mm     = 211.0
@@ -306,9 +399,9 @@ class ObstacleChallengePlanner(Processor):
         # play the parking-leave maneuver first; False => go straight to normal driving.
         self._start_in_parking = start_in_parking
         # Final parking maneuver at the end of the run: "none" (just stop, default),
-        # "perpendicular" (implemented), or the parallel variants (to come). Unknown => "none".
+        # "perpendicular" or "parallel" (see _park_mirror). Unknown => "none".
         self._park_mode = park_mode if park_mode in (
-            "none", "perpendicular", "parallel_mirror", "parallel_reverse") else "none"
+            "none", "perpendicular", "parallel") else "none"
         # Which way the parking-leave exits (and thus the whole track direction). "auto" votes the
         # LiDAR opening over the first few scans (see _PARK_EXIT_VOTES); "left" forces CCW and
         # "right" forces CW, bypassing the fragile auto pick when the operator knows the layout.
@@ -348,17 +441,24 @@ class ObstacleChallengePlanner(Processor):
         self._maneuver_kind: int = self._M_CENTER
         self._active_front_trigger: mm = self._outer_gate()  # trigger in force (for debug)
         self._d_front_start: mm | None = None
+        self._lat_fix_pending: bool = False   # re-anchor lat_dr from the side walls (after a parking start)
+        self._leave_start_pos: tuple[mm, mm] | None = None   # odometry pose where the slot-leave began
         self._stopped: bool = False
+        # Finish-trigger filter state (see _FINISH_JUMP_* / _FINISH_DEBOUNCE).
+        self._finish_ref:     tuple[mm, mm] | None = None   # (last accepted d_front, _dist_signed then)
+        self._finish_rejects: int = 0
+        self._finish_hits:    int = 0
 
         # Parking-leave maneuver scratch.
         self._exit_votes:        list[int] = []  # per-scan exit-side votes (auto pick), majority commits
-        self._park_step:         int   = self._PK_KTURN  # sub-step of the leave maneuver
+        self._park_step:         int   = 0  # index into _park_sequence()
+        self._park_back_pre_travel: mm = 0.0  # distance BACK_PRE actually reversed (lateral offset)
         self._kturn_forward:     bool  = True   # current K-turn leg direction (fwd vs reverse)
+        self._kturn_wall_last:   mm | None = None  # last counted wall reading in the travel direction this leg
         self._park_leg_mark:     mm    = 0.0    # signed-distance marker for the current leg/step cap
         self._park_settle_until: float = 0.0    # monotonic deadline for the post-exit dwell (0 = not started)
         self._park_in_step:      int   = 0      # sub-step of the FINAL parking maneuver (_S_PARK)
         self._park_in_deadline:  float = 0.0    # monotonic hard-stop for the park drive-in (stall-proof)
-        self._park_front_min:    float = float("inf")  # min outer-wall (front) distance seen during drive-in
 
         # Per-scan debug scratch (reset each scan, packaged by _publish_debug).
         self._dbg: dict = {}
@@ -414,6 +514,9 @@ class ObstacleChallengePlanner(Processor):
             self._publish_debug(a, r, yaw, seg_heading, e_head)
             self.on_track_heading(float(self._track.theta), float(self._track.target_heading))
             return
+
+        if self._lat_fix_pending and self._state in (self._S_PARK_SETTLE, self._S_STRAIGHT, self._S_SWITCH):
+            self._lateral_fix(a, r, e_head)
 
         if self._state == self._S_INIT:
             self._init_phase(a, r, yaw, seg_heading, e_head)
@@ -487,12 +590,15 @@ class ObstacleChallengePlanner(Processor):
         # Step 1 target: perpendicular to the segment, facing the inner wall = the corner
         # target heading (seg_heading + turn_sign*90). Step 3 will return to seg_heading.
         self._track.target_heading = self._wrap(seg_heading + self._track.turn_sign * math.pi / 2.0)
-        self._park_step     = self._PK_KTURN
+        self._park_step     = 0   # index into _park_sequence()
+        self._park_back_pre_travel = 0.0
         self._kturn_forward = True
+        self._kturn_wall_last = None
         self._park_leg_mark = self._dist_signed
         # Freeze principal-angle detection for the maneuver: the robot rotates hard next to the
         # close parking walls, which would corrupt the tangent fit. theta is already seeded.
         self._track.theta_frozen = True
+        self._leave_start_pos = self._ego.position   # the slot pose (reference for _d_front_start)
         self._set_state(self._S_PARK_LEAVE)
 
     def _park_leave(self, a: np.ndarray, r: np.ndarray, yaw: radian) -> None:
@@ -500,17 +606,38 @@ class ObstacleChallengePlanner(Processor):
         # (theta + seg_k*90, both latched), so it is recomputed here for free.
         seg  = self._track.segment_heading(yaw)
         perp = self._wrap(seg + self._track.turn_sign * math.pi / 2.0)  # facing the inner wall
-        self._maneuver_step = self._park_step   # surfaced as corner_step in the debug/visualiser
-        if self._park_step == self._PK_KTURN:
+        kind = self._park_sequence()[self._park_step]
+        self._maneuver_step = kind              # surfaced as corner_step in the debug/visualiser
+        if kind == self._PK_KTURN:
             self._park_kturn(a, r, yaw, perp)
-        elif self._park_step == self._PK_APPROACH:
+        elif kind == self._PK_APPROACH:
             self._park_approach(a, r, yaw, perp)
-        else:
+        elif kind == self._PK_BACK_PRE:
+            self._park_back_straight(a, r, yaw, perp, self._park_back_dists()[0])
+        elif kind == self._PK_REVERSE_OUT:
             self._park_reverse_out(yaw, seg)
+        else:
+            self._park_back_straight(a, r, yaw, seg, self._park_back_dists()[1])
+
+    def _park_sequence(self) -> tuple[int, ...]:
+        # Leave steps (both directions; a 0 BACK_* distance makes that step a no-op).
+        return (self._PK_KTURN, self._PK_APPROACH, self._PK_BACK_PRE,
+                self._PK_REVERSE_OUT, self._PK_BACK_POST)
+
+    def _park_back_dists(self) -> tuple[mm, mm]:
+        # (BACK_PRE, BACK_POST) straight-reverse distances for the current track direction.
+        if self._track.turn_sign < 0:
+            return self._PARK_LEAVE_BACK_PRE_CCW, self._PARK_LEAVE_BACK_POST_CCW
+        return self._PARK_LEAVE_BACK_PRE_CW, self._PARK_LEAVE_BACK_POST_CW
 
     def _advance_park_step(self) -> None:
+        if self._park_sequence()[self._park_step] == self._PK_BACK_PRE:
+            self._park_back_pre_travel = abs(self._dist_signed - self._park_leg_mark)
         self._park_step += 1
         self._park_leg_mark = self._dist_signed
+        if self._park_step >= len(self._park_sequence()):
+            self._complete_park_leave()
+            return
         if self._state_hold_s > 0.0:
             self._hold_until = time.monotonic() + self._state_hold_s
 
@@ -519,33 +646,58 @@ class ObstacleChallengePlanner(Processor):
         if self._kturn_toward(a, r, yaw, perp):
             self._advance_park_step()
 
-    def _kturn_toward(self, a: np.ndarray, r: np.ndarray, yaw: radian, target: radian) -> bool:
+    def _kturn_toward(self, a: np.ndarray, r: np.ndarray, yaw: radian, target: radian,
+                      invert: bool = False, speed: float | None = None,
+                      fwd_leg: float | None = None, rev_leg: float | None = None,
+                      clear: float | None = None) -> bool:
         # Rotate yaw toward `target` by alternating forward/reverse legs so net travel stays small
         # (never reaching the fore/aft wall). `rot` = which way to turn to reach the target; a
         # forward leg steers `rot`, a reverse leg steers `-rot` (same rotation while backing). A leg
         # runs to its cap (_PARK_KTURN_FWD_LEG / _REV_LEG), ending early only after _PARK_KTURN_MIN
         # once a wall is within _PARK_KTURN_CLEAR in the travel direction (the MIN floor prevents the
         # boxed-in flip-without-moving deadlock). Returns True within _PARK_PERP_LEAD of the target.
+        #
+        # `invert` plays the K-turn in REVERSE: the long leg becomes the REVERSE one (so the net drift
+        # flips direction). The caller must also start with `_kturn_forward = False`. This is what the
+        # parallel-park STRAIGHTEN uses to undo the leave's forward-dominant KTURN, step for step.
         if abs(self._wrap(yaw - target)) < self._PARK_PERP_LEAD:
             return True
         rot      = math.copysign(1.0, self._wrap(target - yaw))
         traveled = abs(self._dist_signed - self._park_leg_mark)
-        leg_cap  = self._PARK_KTURN_FWD_LEG if self._kturn_forward else self._PARK_KTURN_REV_LEG
-        wall     = self._wall_distance(a, r, 0.0 if self._kturn_forward else math.pi)
+        fl = self._PARK_KTURN_FWD_LEG if fwd_leg is None else fwd_leg
+        rl = self._PARK_KTURN_REV_LEG if rev_leg is None else rev_leg
+        if invert:
+            leg_cap = rl if self._kturn_forward else fl
+        else:
+            leg_cap = fl if self._kturn_forward else rl
+        cl = self._PARK_KTURN_CLEAR if clear is None else clear
+        # The wall early-out uses the LAST COUNTED reading (>= _PARK_KTURN_WALL_RAYS rays), so a wall that
+        # drops out of the LiDAR up close keeps its last close value: in CW slot-leaves the front parking
+        # wall read 131-139mm before _PARK_KTURN_MIN was reached and was gone (0-3 rays) by the time it
+        # was, so the first leg ran its full cap into the wall (run_150338 and 9 others). Not the
+        # NEAREST reading: when the robot turns AWAY from a wall it starts the leg near (CCW 2nd forward
+        # leg, ~140-150mm), a real far reading must replace it or the leg is cut short (run_203536).
+        center = 0.0 if self._kturn_forward else math.pi
+        n_rays = int(np.count_nonzero(np.abs(self._wrap_array(a - center)) < self._SIDE_HALF))
+        if n_rays >= self._PARK_KTURN_WALL_RAYS:
+            self._kturn_wall_last = self._wall_distance(a, r, center)
         leg_done = traveled >= leg_cap or (
-            traveled >= self._PARK_KTURN_MIN and wall is not None and wall < self._PARK_KTURN_CLEAR)
+            traveled >= self._PARK_KTURN_MIN
+            and self._kturn_wall_last is not None and self._kturn_wall_last < cl)
         if leg_done:
             self._kturn_forward = not self._kturn_forward
             self._park_leg_mark = self._dist_signed
+            self._kturn_wall_last = None
             return False
+        spd = self._SPEED_PARK if speed is None else speed
         if self._kturn_forward:
             aim = rot * self._PARK_KTURN_STEER
-            self._emit(aim, self._TURN_LOOK, self._SPEED_PARK)
-            self._dbg["aim"] = aim; self._dbg["speed"] = self._SPEED_PARK
+            self._emit(aim, self._TURN_LOOK, spd)
+            self._dbg["aim"] = aim; self._dbg["speed"] = spd
         else:
             aim = -rot * self._PARK_KTURN_STEER          # opposite steer -> same rotation, reversing
-            self._emit_reverse(aim, self._REVERSE_LOOK, self._SPEED_PARK)
-            self._dbg["aim"] = aim; self._dbg["speed"] = -self._SPEED_PARK
+            self._emit_reverse(aim, self._REVERSE_LOOK, spd)
+            self._dbg["aim"] = aim; self._dbg["speed"] = -spd
         return False
 
     def _park_approach(self, a: np.ndarray, r: np.ndarray, yaw: radian, perp: radian) -> None:
@@ -578,18 +730,58 @@ class ObstacleChallengePlanner(Processor):
         reached = abs(self._wrap(yaw - seg)) < self._PARK_OUT_LEAD
         capped  = abs(self._dist_signed - self._park_leg_mark) >= self._PARK_OUT_MAX
         if reached or capped:
-            self._complete_park_leave()
+            self._advance_park_step()   # last step for CW; CCW continues with BACK_POST
             return
         angle = ts * self._PARK_OUT_ANGLE
         self._emit_reverse(angle, self._REVERSE_LOOK, self._SPEED_PARK)
         self._dbg["aim"] = angle; self._dbg["speed"] = -self._SPEED_PARK
+
+    def _park_back_straight(
+        self, a: np.ndarray, r: np.ndarray, yaw: radian, heading: radian, dist: mm,
+    ) -> None:
+        # Leave: straight reverse holding `heading` for `dist` (odometry). Ends early if the wall
+        # behind is within _PARK_LEAVE_BACK_CLEAR. dist <= 0 skips the step.
+        rear = self._wall_distance(a, r, math.pi)
+        self._dbg["rear"] = rear if rear is not None else float("nan")
+        # Count only REVERSE travel, from the most-forward point reached in this step. BACK_PRE starts
+        # while the robot is still coasting forward from APPROACH (~35-40mm before the motor reverses);
+        # an abs() distance counted that coast as travel: 30mm ended on the coast alone without ever
+        # reversing (run_004440), 40mm had to undo the coast first and reversed ~85mm (run_004348).
+        self._park_leg_mark = max(self._park_leg_mark, self._dist_signed)
+        traveled = self._park_leg_mark - self._dist_signed
+        if traveled >= dist or (rear is not None and rear < self._PARK_LEAVE_BACK_CLEAR):
+            self._advance_park_step()
+            return
+        aim = max(-self._MAX_AIM, min(self._MAX_AIM, -self._wrap(heading - yaw)))   # reverse heading hold
+        self._emit_reverse(aim, self._REVERSE_LOOK, self._SPEED_PARK)
+        self._dbg["aim"] = aim; self._dbg["speed"] = -self._SPEED_PARK
+
+    def _lateral_fix(self, a: np.ndarray, r: np.ndarray, e_head: radian) -> None:
+        # One-shot after a parking start: set lat_dr (+ = right of the corridor centre) from the two
+        # side walls, read perpendicular to the SEGMENT (so robot yaw doesn't matter). Only a clean pair
+        # counts — a parking wall, pillar or the open corner square beside the robot breaks the sum.
+        # Abandoned once the start straight is left.
+        if self._track.corner_count != 0:
+            self._lat_fix_pending = False
+            return
+        left  = self._wall_distance(a, r, self._wrap(e_head - math.pi / 2.0))
+        right = self._wall_distance(a, r, self._wrap(e_head + math.pi / 2.0))
+        if left is None or right is None or abs(left + right - self._CORRIDOR_WIDTH) > self._LAT_FIX_TOL:
+            return
+        self._lat_dr = (left - right) / 2.0
+        self._lat_fix_pending = False
 
     def _complete_park_leave(self) -> None:
         # On the track now, aligned with the segment: reset lateral dead-reckoning to treat the
         # current position as the lane origin, centre the lane, resume theta detection. Then dwell
         # (PARK_SETTLE) to read the obstacle colour on clean frames before driving. corner_count
         # stays 0, so the start straight (and its parking-wall lane shift) is in force.
-        self._lat_dr = 0.0
+        # Seed the lateral offset assuming the leave ended on the centre line, plus BACK_PRE (which
+        # backs that much further from the inner wall, toward the outer side = -turn_sign). This is
+        # only a fallback: the leave's real end varies (35-107mm off in CW), so _lateral_fix replaces it
+        # with the LiDAR-measured offset on the first clean side-wall pair.
+        self._lat_dr = -self._track.turn_sign * self._park_back_pre_travel
+        self._lat_fix_pending = True
         self._track.target_offset = 0.0
         self._track.current_lane  = 0.0
         self._track.theta_frozen  = False   # resume principal-angle detection on the track
@@ -662,18 +854,59 @@ class ObstacleChallengePlanner(Processor):
         # begins parking) when the stop point is reached.
         if self._track.corner_count < self._TOTAL_CORNERS or d_front is None:
             return False
+        if not self._plausible_front(d_front):
+            self._finish_hits = 0
+            return False
         if self._park_mode == "none":
             # Just stop, centred in the segment: a fixed standoff from the end wall,
             # independent of the start pose (see _FINISH_STOP_DIST).
             reached = d_front <= self._FINISH_STOP_DIST
         else:
-            # Parking modes must reach the actual slot (where the run began), so keep the
-            # start-relative trigger.
-            reached = (self._d_front_start is not None
-                       and d_front <= self._d_front_start + self._FINISH_TOL)
-        if reached:
+            # Parking modes start the maneuver relative to the slot (where the run began). The FWD_ARC
+            # pulls forward as it rotates, so begin a turn-radius early (see _PARK_ARC_START_AHEAD_*).
+            arc_front = self._park_arc_start_front()
+            reached = arc_front is not None and d_front <= arc_front
+        self._finish_hits = self._finish_hits + 1 if reached else 0
+        if self._finish_hits >= self._FINISH_DEBOUNCE:
             self._begin_park()
-        return reached
+            return True
+        return False
+
+    def _park_arc_start_front(self) -> mm | None:
+        # End-wall distance at which the final-park arc starts (relative to the slot = run start).
+        if self._d_front_start is None:
+            return None
+        ahead = (self._PARK_ARC_START_AHEAD_CW if self._track.turn_sign > 0
+                 else self._PARK_ARC_START_AHEAD_CCW)
+        return self._d_front_start + ahead
+
+    def _approach_speed(self, speed: float) -> float:
+        # Ramp the drive speed down toward the final-park arc start (see _PARK_SLOWDOWN_*). Uses the
+        # last jump-checked end-wall distance, so a cluttered-cone glitch cannot cause a slow-down.
+        if (self._park_mode == "none" or self._track.corner_count < self._TOTAL_CORNERS
+                or self._finish_ref is None):
+            return speed
+        arc_front = self._park_arc_start_front()
+        if arc_front is None:
+            return speed
+        remaining = self._finish_ref[0] - arc_front
+        frac = max(0.0, min(1.0, remaining / self._PARK_SLOWDOWN_DIST))
+        return min(speed, self._PARK_SLOWDOWN_MIN_SPEED + frac * (speed - self._PARK_SLOWDOWN_MIN_SPEED))
+
+    def _plausible_front(self, d_front: mm) -> bool:
+        # Jump check for the finish trigger: the end wall can only get nearer by about the distance
+        # driven. A larger drop is a cone filled by near clutter (parking walls / pillar) -> reject.
+        # Increases are always accepted. _FINISH_JUMP_RESET consecutive rejections accept the new level.
+        if self._finish_ref is not None:
+            ref_front, ref_dist = self._finish_ref
+            travel = self._dist_signed - ref_dist
+            if d_front < ref_front - travel - self._FINISH_JUMP_TOL:
+                self._finish_rejects += 1
+                if self._finish_rejects < self._FINISH_JUMP_RESET:
+                    return False
+        self._finish_rejects = 0
+        self._finish_ref = (d_front, self._dist_signed)
+        return True
 
     def _drive_straight(
         self,
@@ -683,7 +916,18 @@ class ObstacleChallengePlanner(Processor):
         d_front, obstacle = self._forward_cone(a, r, x, y, e_head)
 
         if self._d_front_start is None and d_front is not None:
+            # The final park is placed relative to the SLOT. After a parking start, d_front is read only
+            # once the leave is done, and the leave's along-track travel varies: in CW the K-turn's first
+            # forward leg sometimes stops early at the parking wall ahead (~45mm instead of ~175mm), so
+            # the leave ended ~130mm further back and the arc started ~130mm early, reversing into the
+            # first parking wall (run_141221 ... run_151532). Add back the odometry travel along the
+            # segment since the leave began, so _d_front_start is the slot's end-wall distance.
             self._d_front_start = d_front
+            if self._leave_start_pos is not None:
+                pos = self._ego.position
+                along = ((pos[0] - self._leave_start_pos[0]) * math.cos(seg_heading)
+                         + (pos[1] - self._leave_start_pos[1]) * math.sin(seg_heading))
+                self._d_front_start = d_front + along
 
         # Finish: after the last corner we are back on the start straight.
         if self._maybe_finish(d_front):
@@ -725,6 +969,7 @@ class ObstacleChallengePlanner(Processor):
 
         near_corner = d_front is not None and d_front < 2.0 * self._outer_gate()
         speed = self._SPEED_CORNER if near_corner else self._SPEED_CRUISE
+        speed = self._approach_speed(speed)
 
         self._emit(aim, self._LOOKAHEAD, speed)
         self._dbg["d_front"] = d_front if d_front is not None else float("nan")
@@ -747,6 +992,8 @@ class ObstacleChallengePlanner(Processor):
         # cone is still computed to keep the pillar-distance latch fresh (and to feed
         # the visualiser).
         d_front, obstacle = self._forward_cone(a, r, x, y, e_head)
+        if obstacle is not None and self._past_park_cutoff(obstacle, d_front, e_head):
+            obstacle = None   # beyond the slot on the final pass: don't re-aim the switch at it
         if obstacle is not None:
             self._dbg["obstacle_x"] = obstacle[0]
             self._dbg["obstacle_y"] = obstacle[1]
@@ -790,11 +1037,12 @@ class ObstacleChallengePlanner(Processor):
         lookahead = math.hypot(forward_seg, lateral_error)
         aim = self._wrap(bearing + e_head)     # segment-frame bearing -> body frame
         aim = max(-self._MAX_AIM, min(self._MAX_AIM, aim))
-        self._emit(aim, lookahead, self._SPEED_SWITCH)
+        speed = self._approach_speed(self._SPEED_SWITCH)
+        self._emit(aim, lookahead, speed)
 
         self._dbg["d_front"]  = d_front if d_front is not None else float("nan")
         self._dbg["aim"]      = aim
-        self._dbg["speed"]    = self._SPEED_SWITCH
+        self._dbg["speed"]    = speed
         self._dbg["target_x"] = lookahead * math.cos(aim)
         self._dbg["target_y"] = lookahead * math.sin(aim)
 
@@ -833,15 +1081,21 @@ class ObstacleChallengePlanner(Processor):
         obstacle = None
         if near.any():
             xn, yn = xc[near], yc[near]
-            rn = rc[near]
-            i0 = int(np.argmin(rn))
-            close = np.hypot(xn - xn[i0], yn - yn[i0]) < self._CLUSTER_RADIUS
-            obstacle = (float(np.mean(xn[close])), float(np.mean(yn[close])))
-            # In the start straight, keep it only if it is free-standing (a pillar), not
-            # continuous with the perimeter (a parking wall). Tested against the full scan.
-            if self._track.corner_count % 4 == 0 and \
-                    not self._is_free_standing(a, r, ain[near][close], rn[close]):
-                obstacle = None
+            rn, an = rc[near], ain[near]
+            left = np.ones(len(rn), dtype=bool)          # points not yet assigned to a cluster
+            while left.any():
+                idx = np.flatnonzero(left)
+                i0 = int(idx[np.argmin(rn[idx])])
+                close = left & (np.hypot(xn - xn[i0], yn - yn[i0]) < self._CLUSTER_RADIUS)
+                # In the start straight, keep it only if it is free-standing (a pillar), not
+                # continuous with the perimeter (a parking wall). Tested against the full scan.
+                # A rejected parking wall must not hide a pillar behind it, so try the next-nearest
+                # cluster (run_005259: the parking wall was nearer, the pillar never got tested).
+                if self._track.corner_count % 4 != 0 or \
+                        self._is_free_standing(a, r, an[close], rn[close]):
+                    obstacle = (float(np.mean(xn[close])), float(np.mean(yn[close])))
+                    break
+                left &= ~close
         return d_front, obstacle
 
     def _is_free_standing(
@@ -854,6 +1108,10 @@ class ObstacleChallengePlanner(Processor):
         # (a return there at ~cluster range), so it fails. `a`/`r` are the FULL sorted scan.
         if len(cluster_a) == 0:
             return True
+        cx, cy = cluster_r * np.cos(cluster_a), cluster_r * np.sin(cluster_a)
+        span = float(np.max(np.hypot(cx[:, None] - cx[None, :], cy[:, None] - cy[None, :])))
+        if span >= self._OBSTACLE_MAX_EXTENT:
+            return False                                      # too long for a 50x50 pillar -> parking wall
         b_lo   = float(np.min(cluster_a))
         b_hi   = float(np.max(cluster_a))
         obs_r  = float(np.median(cluster_r))
@@ -900,6 +1158,8 @@ class ObstacleChallengePlanner(Processor):
         # Colour memory: a pillar is keyed by (segment, distance from the segment's END wall). If it
         # was learned on an earlier lap, RECALL that colour (so the lane is right even if the camera
         # misreads this pass); otherwise read the camera and STORE it on the first confident read.
+        if obstacle is not None and self._past_park_cutoff(obstacle, d_front, e_head):
+            obstacle = None
         if obstacle is None:
             self._votes.clear()
             return
@@ -929,6 +1189,27 @@ class ObstacleChallengePlanner(Processor):
             self._switch_pillar_dist = self._dist_signed + obstacle[0]
         self._dbg["obstacle_x"] = obstacle[0]
         self._dbg["obstacle_y"] = obstacle[1]
+
+    def _past_park_cutoff(self, obstacle: tuple[float, float], d_front: mm | None, e_head: radian) -> bool:
+        # Final segment of a parking run: the robot never drives past the final-park arc start, so a
+        # pillar between that point and the end wall can't block it. Discard it — otherwise it starts a
+        # lane switch that is still running when the park begins. Cutoff = the arc-start point
+        # (_d_front_start + _PARK_ARC_START_AHEAD_*) minus _PARK_CUTOFF_NOSE_MARGIN toward the end wall,
+        # so a pillar the nose would reach at the arc start is still avoided. The end-wall distance is the jump-checked one
+        # (propagated by odometry) so a cluttered-cone glitch can't misplace the pillar.
+        if self._park_mode == "none" or self._track.corner_count < self._TOTAL_CORNERS:
+            return False
+        arc_front = self._park_arc_start_front()
+        if arc_front is None:
+            return False
+        front = d_front
+        if self._finish_ref is not None:
+            ref_front, ref_dist = self._finish_ref
+            front = ref_front - (self._dist_signed - ref_dist)
+        if front is None:
+            return False
+        pos = front - (obstacle[0] * math.cos(e_head) + obstacle[1] * math.sin(e_head))
+        return pos < arc_front - self._PARK_CUTOFF_NOSE_MARGIN
 
     def _recall_obstacle(self, seg: int, pos: mm) -> ObstacleColor | None:
         # Stored colour of a pillar in this segment within _OBS_MEM_TOL of `pos` (end-wall distance).
@@ -1165,8 +1446,8 @@ class ObstacleChallengePlanner(Processor):
             return
         self._park_in_step   = 0
         self._kturn_forward  = True
+        self._kturn_wall_last = None
         self._park_leg_mark  = self._dist_signed
-        self._park_front_min = float("inf")
         self._track.theta_frozen = True     # rotating next to the parking walls
         self._set_state(self._S_PARK)
 
@@ -1174,64 +1455,94 @@ class ObstacleChallengePlanner(Processor):
         self, a: np.ndarray, r: np.ndarray, yaw: radian, seg: radian, e_head: radian,
     ) -> None:
         self._maneuver_step = self._park_in_step   # surfaced as corner_step in debug/visualiser
-        if self._park_mode == "perpendicular":
-            self._park_perpendicular(a, r, yaw, seg)
-        else:
-            # Parallel variants not implemented yet -> stop safely at the slot.
-            self._finish()
+        self._park_mirror(a, r, yaw, seg)
 
-    def _park_perpendicular(self, a: np.ndarray, r: np.ndarray, yaw: radian, seg: radian) -> None:
-        # Nose-in perpendicular park, referenced to the two SIDE parking walls (the outer wall
-        # vanishes below the LiDAR min range as the nose approaches). Steps:
-        #   0 turn  — K-turn 90deg to face the OUTER wall.
-        #   1 drive — drive in (facing outer, centring between the two parking walls) and STOP as
-        #             soon as both flank the robot (it is between them). It never drives to the outer
-        #             wall. Distance cap + a HARD wall-clock timeout make a stall-against-the-wall
-        #             impossible to loop (the crash in run_20260913_153744).
-        ts = self._track.turn_sign
-        face_outer = self._wrap(seg - ts * math.pi / 2.0)   # world heading pointing at the outer wall
+    def _park_mirror(self, a: np.ndarray, r: np.ndarray, yaw: radian, seg: radian) -> None:
+        # Final park, both modes. Parallel park = the slot-LEAVE maneuver run in reverse, step for step,
+        # reusing its tuned primitives. The leave goes (slot, facing seg) -> KTURN to perp -> APPROACH to
+        # the inner-wall standoff -> REVERSE_OUT arc back onto the lane facing seg. Inverting each step,
+        # in reverse order, drives (lane, facing seg) back into the slot:
+        #   0 REV_ARC   — REVERSE arc seg -> perp: back up while rotating to face the inner wall, the
+        #                 tail swinging toward the slot. Reverse (not forward) so it works from the inner
+        #                 lane too, where a forward arc has no room. Gyro-terminated; travel cap backstop.
+        #   1 BACK_IN   — reverse (facing perp) toward the outer wall / slot, holding perp with an
+        #                 anti-clip nudge off the side parking walls, until seated (inner wall at
+        #                 _PARK_BACK_FRONT). Flank / distance cap / wall-clock timeout are stall-proof
+        #                 backstops. "perpendicular" STOPS here, perpendicular in the slot.
+        #   2 STRAIGHTEN— (parallel only) K-turn perp -> seg in place (inverse of KTURN):
+        #                 rotate to parallel, then stop.
+        ts   = self._track.turn_sign
+        perp = self._wrap(seg + ts * math.pi / 2.0)   # facing the inner wall (same perp as the leave)
+
         if self._park_in_step == 0:
-            if self._kturn_toward(a, r, yaw, face_outer):
+            self._track.target_heading = perp
+            reached = abs(self._wrap(yaw - perp)) < self._PARK_OUT_LEAD
+            capped  = abs(self._dist_signed - self._park_leg_mark) >= self._PARK_OUT_MAX
+            if reached or capped:
                 self._park_in_step     = 1
                 self._park_leg_mark    = self._dist_signed
-                self._park_in_deadline = time.monotonic() + self._PARK_IN_TIMEOUT
+                self._park_in_deadline = time.monotonic() + self._PARK_BACK_TIMEOUT
+                return
+            # REVERSE arc toward perp: reversing, the opposite steer (-ts) rotates the nose toward the
+            # inner wall while the tail swings toward the outer wall / slot. Works from any lane — a
+            # forward arc from the inner lane has no room before the inner wall.
+            aim = -ts * self._PARK_OUT_ANGLE
+            self._emit_reverse(aim, self._REVERSE_LOOK, self._SPEED_PARK_END)
+            self._dbg["aim"] = aim; self._dbg["speed"] = -self._SPEED_PARK_END
             return
 
-        # Facing the outer wall: it is dead ahead (bearing 0); the two parking walls are now
-        # left/right (bearings -+90deg).
-        front = self._wall_distance(a, r, 0.0)
-        left  = self._wall_distance(a, r, -math.pi / 2.0)
-        right = self._wall_distance(a, r,  math.pi / 2.0)
-        if front is not None:
-            self._park_front_min = min(self._park_front_min, front)
-        self._dbg["rear"] = front if front is not None else float("nan")
+        if self._park_in_step == 1:
+            self._track.target_heading = perp
+            # Facing the inner wall, it is dead ahead (bearing 0); reversing drives toward the outer
+            # wall / into the slot, so the inner-wall distance GROWS. Seat when it exceeds the fixed
+            # _PARK_BACK_FRONT (the robot has reversed the slot depth in). The inner wall is far and
+            # always cleanly rangeable; flank / cap / timeout are backstops.
+            front = self._wall_distance(a, r, 0.0)
+            rear  = self._wall_distance(a, r, math.pi)
+            left  = self._wall_distance(a, r, -math.pi / 2.0)
+            right = self._wall_distance(a, r,  math.pi / 2.0)
+            self._dbg["rear"] = rear if rear is not None else float("nan")
+            seated  = front is not None and front >= self._PARK_BACK_FRONT
+            rear_min = rear is not None and rear <= self._PARK_BACK_REAR_MIN   # hard floor: never hit the wall
+            flanked = (left is not None and right is not None                # backstop: wedged between walls
+                       and left  < self._PARK_IN_FLANK_MAX
+                       and right < self._PARK_IN_FLANK_MAX)
+            capped  = abs(self._dist_signed - self._park_leg_mark) >= self._PARK_BACK_MAX
+            timeout = time.monotonic() >= self._park_in_deadline
+            if seated or rear_min or flanked or capped or timeout:
+                if self._park_mode == "perpendicular":
+                    self._finish()            # perpendicular park: no STRAIGHTEN
+                    return
+                self._park_in_step  = 2
+                self._park_leg_mark = self._dist_signed
+                self._kturn_forward = False   # STRAIGHTEN plays the leave's KTURN in reverse (reverse-first)
+                self._kturn_wall_last = None
+                return
+            # Hold perp while reversing (steer -e_perp, as the leave's APPROACH reverse branch does),
+            # plus an anti-clip nudge: back AWAY from a side wall only when it is genuinely CLOSE, so
+            # a far/open reading can't saturate the steer (the run_20260913_155013 veer).
+            e_perp = self._wrap(perp - yaw)
+            aim = -e_perp
+            near_left  = left  is not None and left  < self._PARK_SIDE_MIN
+            near_right = right is not None and right < self._PARK_SIDE_MIN
+            if near_left and (not near_right or left <= right):
+                aim += min(self._PARK_AVOID_MAX, self._PARK_AVOID_GAIN * (self._PARK_SIDE_MIN - left))
+            elif near_right:
+                aim -= min(self._PARK_AVOID_MAX, self._PARK_AVOID_GAIN * (self._PARK_SIDE_MIN - right))
+            aim = max(-self._MAX_AIM, min(self._MAX_AIM, aim))
+            self._emit_reverse(aim, self._REVERSE_LOOK, self._SPEED_PARK_END)
+            self._dbg["aim"] = aim; self._dbg["speed"] = -self._SPEED_PARK_END
+            return
 
-        near    = front is not None and front <= self._PARK_IN_STANDOFF          # at the outer wall
-        lost    = front is None and self._park_front_min <= self._PARK_IN_STANDOFF + self._PARK_IN_LOST_MARGIN
-        flanked = (left is not None and right is not None                        # alternate seat
-                   and left  < self._PARK_IN_FLANK_MAX
-                   and right < self._PARK_IN_FLANK_MAX)
-        capped  = abs(self._dist_signed - self._park_leg_mark) >= self._PARK_IN_MAX
-        timeout = time.monotonic() >= self._park_in_deadline
-        if near or lost or flanked or capped or timeout:
+        # step 2: rotate from perp toward (just past) parallel by playing the leave's KTURN in reverse
+        # (reverse-first, long leg reversed), tucking into the slot. The final heading is tilted a bit
+        # PAST parallel toward the outer wall (nose toward the perimeter) by _PARK_STRAIGHTEN_OUT_BIAS.
+        target = self._wrap(seg - ts * self._PARK_STRAIGHTEN_OUT_BIAS)
+        self._track.target_heading = target
+        if self._kturn_toward(a, r, yaw, target, invert=True, speed=self._SPEED_PARK_END,
+                              fwd_leg=self._PARK_END_KTURN_FWD_LEG, rev_leg=self._PARK_END_KTURN_REV_LEG,
+                              clear=self._PARK_END_KTURN_CLEAR):
             self._finish()
-            return
-
-        # Hold the outer-facing heading, plus an ANTI-CLIP nudge: steer away from a side parking wall
-        # only when it is genuinely CLOSE (< _PARK_SIDE_MIN). Reacting only to a near wall (not a
-        # "centre between the two" term) means a far/open reading can't saturate the steer — that was
-        # the veer in run_20260913_155013. Left wall (-90deg) too close -> steer +y (right); right too
-        # close -> steer -y.
-        aim = self._wrap(face_outer - yaw)
-        near_left  = left  is not None and left  < self._PARK_SIDE_MIN
-        near_right = right is not None and right < self._PARK_SIDE_MIN
-        if near_left and (not near_right or left <= right):
-            aim += min(self._PARK_AVOID_MAX, self._PARK_AVOID_GAIN * (self._PARK_SIDE_MIN - left))
-        elif near_right:
-            aim -= min(self._PARK_AVOID_MAX, self._PARK_AVOID_GAIN * (self._PARK_SIDE_MIN - right))
-        aim = max(-self._MAX_AIM, min(self._MAX_AIM, aim))
-        self._emit(aim, self._TURN_LOOK, self._SPEED_PARK)
-        self._dbg["aim"] = aim; self._dbg["speed"] = self._SPEED_PARK
 
     def _finish(self) -> None:
         self._stopped = True

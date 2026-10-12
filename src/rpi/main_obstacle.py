@@ -92,7 +92,7 @@ def parse_args():
     parser.add_argument('--no-camera',    action = 'store_true', help = 'skip the camera + colour reads (open challenge / no camera)')
     parser.add_argument('--parking-start', action = 'store_true', help = 'the run starts parked in the parking slot (play the leave maneuver first)')
     parser.add_argument('--park-mode', default = 'none',
-                        choices = ('none', 'perpendicular', 'parallel_mirror', 'parallel_reverse'),
+                        choices = ('none', 'perpendicular', 'parallel'),
                         help = 'final parking maneuver at the end of the run (default: none = just stop)')
     parser.add_argument('--park-exit-side', default = 'auto', choices = ('auto', 'left', 'right'),
                         help = 'with --parking-start, which way the leave maneuver exits: '

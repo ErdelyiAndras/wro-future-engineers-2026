@@ -70,7 +70,7 @@ class PathPlanningVisualizer:
     _CORNER_STATE = 2   # _S_CORNER
     _CORNER_KINDS = {0: "outer", 1: "center", 2: "inner"}
     _PARK_LEAVE_STATE = 5   # _S_PARK_LEAVE
-    _PARK_STEPS = {0: "kturn", 1: "approach", 2: "reverse-out"}
+    _PARK_STEPS = {0: "kturn", 1: "approach", 2: "reverse-out", 3: "back-pre", 4: "back-post"}
 
     _SIZE:    int          = 720
     _PADDING: int          = 40
