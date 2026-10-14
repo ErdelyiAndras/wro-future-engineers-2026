@@ -361,8 +361,23 @@ class ObstacleChallengePlanner(Processor):
     _TURN_RADIUS_MARGIN: float = 1.15
     _MIN_FORWARD:       mm     = 50.0
 
-    # --- Colour vote buffer ---
+    # --- Obstacle tracks + colour votes ---
+    # Every forward-cone detection is matched to a short-lived TRACK in the odometry (world) frame,
+    # which holds its own sighting count and its own colour votes. An obstacle may change the lane
+    # only once CONFIRMED by _OBS_CONFIRM_HITS sightings, each within _OBS_TRACK_TOL of the last and
+    # with at most _OBS_TRACK_MAX_GAP missed scans between them. Reflective walls produce
+    # intermittent 1-point phantoms (2-3 sightings per ~10 scans, never consecutive) that a single
+    # scan used to turn into a lane change (run_170455: 77.9s, 122.5s); real pillars are re-seen
+    # almost every scan and stay within ~30-80mm in the world frame. Replayed on runs 170455/170847:
+    # those phantoms rejected, real decisions mostly 1-2 scans (<=0.16s) later.
+    # Votes are per track (never mixed across objects — run_170455 112.7s took a stale majority from
+    # a different pillar) and need _VOTE_MIN reads before they count (an empty buffer let ONE read
+    # decide). Within _DEFAULT_COLOR_DIST a single read is used rather than waiting.
+    _OBS_TRACK_TOL:     mm     = 150.0
+    _OBS_CONFIRM_HITS:  int    = 2
+    _OBS_TRACK_MAX_GAP: int    = 1
     _VOTE_LEN:          int    = 5
+    _VOTE_MIN:          int    = 2
 
     # Top-level state codes (recorded numerically in the debug stream). The corner is a
     # SINGLE state; it plays back one of three predefined maneuvers (below).
@@ -438,7 +453,9 @@ class ObstacleChallengePlanner(Processor):
         # Lane / obstacle. (The lane offsets and turn/grid state now live in the shared
         # TrackModel; only the planner's own metering scratch stays here.)
         self._switch_pillar_dist: mm = 0.0  # absolute nose distance of the pillar we switch beside
-        self._votes:  list[ObstacleColor] = []
+        # Obstacle tracks (see _OBS_TRACK_*): {"x","y" world mm, "last" scan, "hits", "votes"}.
+        self._obs_tracks: list[dict] = []
+        self._scan_idx:   int        = 0
         # Obstacle-colour memory: [(segment, end-wall distance, colour), ...], filled on first
         # confident read (lap 1), recalled on re-detection on later laps. Persists the whole run.
         self._obstacle_memory: list[tuple[int, mm, ObstacleColor]] = []
@@ -488,6 +505,7 @@ class ObstacleChallengePlanner(Processor):
             return
 
         self._accumulate_odometry(yaw)
+        self._scan_idx += 1
 
         a, r, x, y = self._body_points(scan)
         if len(a) == 0:
@@ -1007,6 +1025,7 @@ class ObstacleChallengePlanner(Processor):
         if obstacle is not None and self._past_park_cutoff(obstacle, d_front, e_head):
             obstacle = None   # beyond the slot on the final pass: don't re-aim the switch at it
         if obstacle is not None:
+            self._track_obstacle(obstacle)   # keep sightings flowing (lanes are only decided on straights)
             self._dbg["obstacle_x"] = obstacle[0]
             self._dbg["obstacle_y"] = obstacle[1]
 
@@ -1139,20 +1158,52 @@ class ObstacleChallengePlanner(Processor):
 
         return flank_open(b_lo, -1.0) and flank_open(b_hi, +1.0)
 
-    def _resolve_color(self, obstacle: tuple[float, float]) -> ObstacleColor | None:
-        # obstacle is body-frame (x forward, y lateral-right). Project + sample, then
-        # majority-vote over a short buffer so a single bad frame cannot flip the lane.
+    def _obstacle_world(self, obstacle: tuple[float, float]) -> tuple[mm, mm]:
+        # Body-frame (x forward, y right, LiDAR-relative) -> odometry frame, via the rear-axle pose.
+        px, py = self._ego.position
+        h      = self._ego.yaw
+        fwd    = obstacle[0] + self._mount_offset[1]
+        right  = obstacle[1] + self._mount_offset[0]
+        return (px + fwd * math.cos(h) - right * math.sin(h),
+                py + fwd * math.sin(h) + right * math.cos(h))
+
+    def _track_obstacle(self, obstacle: tuple[float, float]) -> dict:
+        # Match this scan's detection to the nearest live track (world frame), or start a new one.
+        # Tracks not seen for more than _OBS_TRACK_MAX_GAP scans are dropped (with their votes).
+        self._obs_tracks = [t for t in self._obs_tracks
+                            if self._scan_idx - t["last"] <= self._OBS_TRACK_MAX_GAP + 1]
+        wx, wy = self._obstacle_world(obstacle)
+        best, best_d = None, self._OBS_TRACK_TOL
+        for t in self._obs_tracks:
+            d = math.hypot(wx - t["x"], wy - t["y"])
+            if d < best_d:
+                best, best_d = t, d
+        if best is None:
+            best = {"x": wx, "y": wy, "last": self._scan_idx, "hits": 1, "votes": []}
+            self._obs_tracks.append(best)
+        elif best["last"] != self._scan_idx:
+            best.update(x = wx, y = wy, last = self._scan_idx)
+            best["hits"] += 1
+        return best
+
+    def _resolve_color(self, obstacle: tuple[float, float], track: dict) -> ObstacleColor | None:
+        # obstacle is body-frame (x forward, y lateral-right). Project + sample into THIS track's
+        # votes, then majority-vote them: needs _VOTE_MIN reads, except within _DEFAULT_COLOR_DIST
+        # where a single read is used (better than the blind default the caller falls back to).
         if self._color_sampler is None:
             return None
+        votes = track["votes"]
         color = self._color_sampler.color_at(obstacle[0], obstacle[1])
         if color is not None:
-            self._votes.append(color)
-            if len(self._votes) > self._VOTE_LEN:
-                self._votes.pop(0)
-        if not self._votes:
+            votes.append(color)
+            if len(votes) > self._VOTE_LEN:
+                votes.pop(0)
+        if not votes:
             return None
-        reds   = self._votes.count(ObstacleColor.RED)
-        greens = self._votes.count(ObstacleColor.GREEN)
+        if len(votes) < self._VOTE_MIN and obstacle[0] > self._DEFAULT_COLOR_DIST:
+            return None
+        reds   = votes.count(ObstacleColor.RED)
+        greens = votes.count(ObstacleColor.GREEN)
         if reds == greens:
             return None
         return ObstacleColor.RED if reds > greens else ObstacleColor.GREEN
@@ -1164,8 +1215,9 @@ class ObstacleChallengePlanner(Processor):
         e_head:   radian,
     ) -> None:
         # Resolve the obstacle's colour and set the sticky mandated lane (with the parking-wall
-        # shift), latching the pillar's nose distance for the switch. No obstacle in view clears the
-        # vote buffer. Shared by DRIVE_STRAIGHT and the post-exit PARK_SETTLE dwell.
+        # shift), latching the pillar's nose distance for the switch. Each detection feeds a world-frame
+        # track (sightings + its own colour votes); only a CONFIRMED track may change the lane (see
+        # _OBS_TRACK_*). Shared by DRIVE_STRAIGHT and the post-exit PARK_SETTLE dwell.
         #
         # Colour memory: a pillar is keyed by (segment, distance from the segment's END wall). If it
         # was learned on an earlier lap, RECALL that colour (so the lane is right even if the camera
@@ -1173,8 +1225,11 @@ class ObstacleChallengePlanner(Processor):
         if obstacle is not None and self._past_park_cutoff(obstacle, d_front, e_head):
             obstacle = None
         if obstacle is None:
-            self._votes.clear()
             return
+        track = self._track_obstacle(obstacle)
+        self._dbg["obstacle_x"] = obstacle[0]
+        self._dbg["obstacle_y"] = obstacle[1]
+        self._dbg["obs_hits"]   = track["hits"]
 
         seg   = self._track.corner_count % 4
         pos   = None
@@ -1185,13 +1240,17 @@ class ObstacleChallengePlanner(Processor):
         recalled  = color is not None
         defaulted = False
         if not recalled:
-            color = self._resolve_color(obstacle)      # camera majority vote
+            color = self._resolve_color(obstacle, track)   # camera vote, per track
             defaulted = (self._default_color_enabled and color is None
                          and obstacle[0] <= self._DEFAULT_COLOR_DIST)
             if defaulted:
                 color = self._DEFAULT_COLOR            # last-moment guess
-            if color is not None and pos is not None:
-                self._store_obstacle(seg, pos, color)  # learn it (store once)
+        # Persistence gate: an unconfirmed detection (possible phantom) neither changes the lane
+        # nor is learned — its colour votes still accumulate on the track for when it confirms.
+        if track["hits"] < self._OBS_CONFIRM_HITS:
+            return
+        if not recalled and color is not None and pos is not None:
+            self._store_obstacle(seg, pos, color)      # learn it (store once)
         # Colour source: 0 = camera, 1 = recalled from memory, 2 = default guess.
         self._dbg["obs_recalled"] = 1 if recalled else (2 if defaulted else 0)
 
@@ -1205,8 +1264,6 @@ class ObstacleChallengePlanner(Processor):
         # beside it even after it leaves the forward cone.
         if self._track.target_offset != self._track.current_lane:
             self._switch_pillar_dist = self._dist_signed + obstacle[0]
-        self._dbg["obstacle_x"] = obstacle[0]
-        self._dbg["obstacle_y"] = obstacle[1]
 
     def _past_park_cutoff(self, obstacle: tuple[float, float], d_front: mm | None, e_head: radian) -> bool:
         # Final segment of a parking run: the robot never drives past the final-park arc start, so a
@@ -1438,7 +1495,7 @@ class ObstacleChallengePlanner(Processor):
         self._track.target_offset = 0.0        # every straight begins centred
         self._track.current_lane  = 0.0
         self._lat_dr        = 0.0
-        self._votes.clear()
+        self._obs_tracks.clear()
         self._set_state(self._S_STRAIGHT)
 
     # ------------------------------------------------------------------ #
@@ -1610,6 +1667,7 @@ class ObstacleChallengePlanner(Processor):
             "obstacle_y":     float("nan"),
             "obstacle_color": 0,
             "obs_recalled":   0,
+            "obs_hits":       0,
             "target_x":       float("nan"),
             "target_y":       float("nan"),
             "rear":           float("nan"),
@@ -1651,6 +1709,7 @@ class ObstacleChallengePlanner(Processor):
             "obstacle_y":     np.float32(d["obstacle_y"]),
             "obstacle_color": np.int32(d["obstacle_color"]),
             "obs_recalled":   np.int32(d["obs_recalled"]),
+            "obs_hits":       np.int32(d["obs_hits"]),   # sightings of the tracked obstacle (persistence)
             # switch target point (forward beside pillar, lateral = lane) in body frame
             "target_x":       np.float32(d["target_x"]),
             "target_y":       np.float32(d["target_y"]),
