@@ -59,11 +59,11 @@ _CAMERA_EXTRINSICS = CameraExtrinsics(
 # H 0-180); a hue that wraps the 0/180 seam (red, or the magenta parking wall) uses two
 # bands. Paste calibration output straight into these lists.
 _RED_COLOR = ColorRange(bands = [
-    (np.array([  0,  43,   4], dtype = np.uint8), np.array([ 10, 255, 255], dtype = np.uint8)),
-    (np.array([170,  43,   4], dtype = np.uint8), np.array([180, 255, 255], dtype = np.uint8)),
+    (np.array([  0, 116,  97], dtype = np.uint8), np.array([ 10, 255, 255], dtype = np.uint8)),
+    (np.array([173, 116,  97], dtype = np.uint8), np.array([180, 255, 255], dtype = np.uint8)),
 ])
 _GREEN_COLOR = ColorRange(bands = [
-    (np.array([ 33,  24,  28], dtype = np.uint8), np.array([ 97, 255, 231], dtype = np.uint8)),
+    (np.array([ 14,  33,  47], dtype = np.uint8), np.array([ 90, 234, 213], dtype = np.uint8)),
 ])
 _PARKING_COLOR = ColorRange(bands = [
     (np.array([  0, 150,  77], dtype = np.uint8), np.array([ 10, 217, 165], dtype = np.uint8)),

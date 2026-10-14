@@ -108,6 +108,14 @@ class ObstacleChallengePlanner(Processor):
     # colour, so the lane is correct even if the camera misreads that pass. (A wrong lap-1 read is a
     # non-issue: passing an obstacle on the wrong side ends the round, so there is no later lap.)
     _OBS_MEM_TOL:       mm     = 150.0     # |end-wall distance| match window for "the same pillar"
+    # Default colour: a pillar whose colour is still unresolved (no recall, no camera majority) once
+    # it is this close ahead is ASSUMED to be _DEFAULT_COLOR, so the robot still switches lanes (50%
+    # chance of the correct side) instead of driving straight into it. Not applied earlier, because
+    # LANE_SWITCH never re-reads the colour: a guess on the first frame would lock out a later real
+    # read. The guess IS stored in the colour memory like a camera read: if the robot survives the
+    # pass the guess was right (wrong side ends the round), so later laps recall it.
+    _DEFAULT_COLOR:      ObstacleColor = ObstacleColor.RED
+    _DEFAULT_COLOR_DIST: mm            = 800.0   # pillar forward distance at/below which the default applies
 
     # --- Lanes ---
     _LANE_OFFSET:       mm     = 300.0     # |lateral| of the left / right lanes from corridor centre
@@ -1170,12 +1178,17 @@ class ObstacleChallengePlanner(Processor):
         if d_front is not None:
             pos   = d_front - (obstacle[0] * math.cos(e_head) + obstacle[1] * math.sin(e_head))
             color = self._recall_obstacle(seg, pos)   # None if never learned
-        recalled = color is not None
+        recalled  = color is not None
+        defaulted = False
         if not recalled:
             color = self._resolve_color(obstacle)      # camera majority vote
+            defaulted = color is None and obstacle[0] <= self._DEFAULT_COLOR_DIST
+            if defaulted:
+                color = self._DEFAULT_COLOR            # last-moment guess
             if color is not None and pos is not None:
                 self._store_obstacle(seg, pos, color)  # learn it (store once)
-        self._dbg["obs_recalled"] = 1 if recalled else 0
+        # Colour source: 0 = camera, 1 = recalled from memory, 2 = default guess.
+        self._dbg["obs_recalled"] = 1 if recalled else (2 if defaulted else 0)
 
         if color == ObstacleColor.RED:
             self._track.target_offset = self._apply_parking_shift(+self._LANE_OFFSET)
