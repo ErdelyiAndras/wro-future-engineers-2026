@@ -46,7 +46,17 @@ Run from `src/rpi/` (so the package imports resolve):
 python -m recording summary <run.h5>              # per-stream counts, rates, sizes, drops
 python -m recording scans   <run.h5> [--worst N]  # per-scan LiDAR dropout stats
 python -m recording dump     <run.h5> <stream>    # decode and print a stream's events
+python -m recording replay   <run.h5> [--speed 0.5] [--start 75]   # play into the visualizers
 ```
+
+`replay` plays the run's `planner_debug` and `lidar_scan` streams into the
+[planner (8084) and LiDAR (8082) visualizers](../visu/README.md) at the recorded timing, so a run
+can be watched again in the browser. Control it from the terminal (type, then Enter): `<Enter>`/`p`
+pause/resume, `n`/`b` step one planner frame forward/back, `g <sec>` jump, `f`/`s` faster/slower,
+`q` quit. Other options: `--loop`, `--no-browser`, `--planner-port`, `--lidar-port`. It shows what
+the planner saw and decided **in that run**; it does not re-run the current planner, and camera
+frames are not recorded, so the colour view cannot be replayed. Loading decodes the whole file
+first (~10 s for a 3-minute run on the Pi).
 
 `python -m recording <run.h5>` with no subcommand defaults to `summary`. See the
 [developer guide](../../../docs/software/setup-guide.md) for the full recording/replay

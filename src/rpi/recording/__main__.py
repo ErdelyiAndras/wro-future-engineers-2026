@@ -8,7 +8,7 @@ from recording.inspect import print_scan_stats, print_dump
 def main() -> None:
     argv = sys.argv[1:]
     # Bare `python -m recording run.h5` keeps working as a summary.
-    if argv and argv[0] not in ('summary', 'scans', 'dump', '-h', '--help'):
+    if argv and argv[0] not in ('summary', 'scans', 'dump', 'replay', '-h', '--help'):
         argv = ['summary'] + argv
 
     parser = argparse.ArgumentParser(prog = 'recording',
@@ -30,6 +30,15 @@ def main() -> None:
     p_dump.add_argument('--start', default = 0,  type = int, help = 'First event index')
     p_dump.add_argument('--count', default = 20, type = int, help = 'Number of events')
 
+    p_replay = sub.add_parser('replay', help = 'Play the run into the planner + LiDAR visualizers')
+    p_replay.add_argument('path', help = 'Path to a .h5 recording file')
+    p_replay.add_argument('--speed', default = 1.0, type = float, help = 'Playback rate (0.5 = half speed)')
+    p_replay.add_argument('--start', default = 0.0, type = float, help = 'Start at this time (s)')
+    p_replay.add_argument('--loop',  action = 'store_true', help = 'Restart at the end')
+    p_replay.add_argument('--no-browser', action = 'store_true', help = "Don't open the visualizers in a browser")
+    p_replay.add_argument('--planner-port', default = 8084, type = int, help = 'Planner visualizer port')
+    p_replay.add_argument('--lidar-port',   default = 8082, type = int, help = 'LiDAR visualizer port')
+
     args = parser.parse_args(argv)
     if args.command == 'summary':
         print_summary(args.path)
@@ -38,6 +47,11 @@ def main() -> None:
                          bin_count = args.bins, worst = args.worst)
     elif args.command == 'dump':
         print_dump(args.path, args.stream, start = args.start, count = args.count)
+    elif args.command == 'replay':
+        from recording.replay import run_replay   # pulls in the visualizers; keep the other commands light
+        run_replay(args.path, speed = args.speed, start = args.start, loop = args.loop,
+                   open_browser = not args.no_browser,
+                   planner_port = args.planner_port, lidar_port = args.lidar_port)
 
 
 if __name__ == '__main__':

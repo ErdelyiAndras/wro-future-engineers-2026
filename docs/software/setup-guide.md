@@ -159,6 +159,7 @@ Every run writes `recordings/run_<timestamp>.h5` unless `--no-record` is given. 
 python -m recording summary recordings/run_<ts>.h5    # streams, rates, sizes, drops
 python -m recording scans   recordings/run_<ts>.h5    # per-scan LiDAR dropout
 python -m recording dump     recordings/run_<ts>.h5 planner_debug --count 40
+python -m recording replay   recordings/run_<ts>.h5    # watch it again in the visualizers (8084 / 8082)
 ```
 
 Copy a file off the robot with `scp <pi-user>@<robot-host>:~/…/recordings/run_<ts>.h5 .`.

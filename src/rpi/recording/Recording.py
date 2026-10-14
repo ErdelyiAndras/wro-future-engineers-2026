@@ -147,7 +147,9 @@ class Recording:
                     decode: bool = True) -> Iterator[tuple[float, str, Any]]:
         if names is None:
             names = list(self.streams.keys())
-        iterators = (
-            ((t, name, payload) for t, payload in self.iter_stream(name, decode = decode))
-            for name in names)
-        yield from heapq.merge(*iterators, key = lambda item: item[0])
+        # Bind each stream's name eagerly: a bare generator expression would read the loop
+        # variable lazily and label every frame with the LAST name.
+        def tagged(name: str) -> Iterator[tuple[float, str, Any]]:
+            for t, payload in self.iter_stream(name, decode = decode):
+                yield t, name, payload
+        yield from heapq.merge(*(tagged(name) for name in names), key = lambda item: item[0])
