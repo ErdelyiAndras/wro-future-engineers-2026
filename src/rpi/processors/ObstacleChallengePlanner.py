@@ -395,6 +395,7 @@ class ObstacleChallengePlanner(Processor):
         start_in_parking: bool = False,
         park_mode:       str  = "none",
         park_exit_side:  str  = "auto",
+        default_color:   bool = True,
     ) -> None:
         super().__init__()
         self._ego           = ego_information
@@ -414,6 +415,9 @@ class ObstacleChallengePlanner(Processor):
         # LiDAR opening over the first few scans (see _PARK_EXIT_VOTES); "left" forces CCW and
         # "right" forces CW, bypassing the fragile auto pick when the operator knows the layout.
         self._park_exit_side = park_exit_side if park_exit_side in ("auto", "left", "right") else "auto"
+        # Whether an unresolved pillar close ahead falls back to _DEFAULT_COLOR (see there). False =
+        # no guess: an unresolved pillar is left alone (no lane change) until a real read or a recall.
+        self._default_color_enabled = default_color
 
         # Debug aid: hold the robot stopped for this many seconds at every state
         # transition so a run can be examined step by step. 0 = off (normal running).
@@ -1182,7 +1186,8 @@ class ObstacleChallengePlanner(Processor):
         defaulted = False
         if not recalled:
             color = self._resolve_color(obstacle)      # camera majority vote
-            defaulted = color is None and obstacle[0] <= self._DEFAULT_COLOR_DIST
+            defaulted = (self._default_color_enabled and color is None
+                         and obstacle[0] <= self._DEFAULT_COLOR_DIST)
             if defaulted:
                 color = self._DEFAULT_COLOR            # last-moment guess
             if color is not None and pos is not None:

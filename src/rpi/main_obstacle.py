@@ -97,6 +97,8 @@ def parse_args():
     parser.add_argument('--park-exit-side', default = 'auto', choices = ('auto', 'left', 'right'),
                         help = 'with --parking-start, which way the leave maneuver exits: '
                                'left=CCW, right=CW, auto=vote the LiDAR opening (default)')
+    parser.add_argument('--no-default-color', action = 'store_true',
+                        help = 'disable the default-colour guess: a pillar the camera cannot resolve is not assumed red')
     parser.add_argument('--no-record',    action = 'store_true', help = 'disable signal recording')
     parser.add_argument('--visu',         action = 'store_true', help = 'start the segment-planner + LiDAR visualizers')
     parser.add_argument('--no-browser',   action = 'store_true', help = 'with --visu, do not open the visualizers in a browser')
@@ -147,6 +149,7 @@ def main():
         start_in_parking   = args.parking_start,
         park_mode          = args.park_mode,
         park_exit_side     = args.park_exit_side,
+        default_color      = not args.no_default_color,
     )
 
     lidar.on_scan += angle_detector

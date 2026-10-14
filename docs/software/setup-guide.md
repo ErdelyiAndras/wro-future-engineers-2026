@@ -120,7 +120,8 @@ Useful flags (both mains share most of them):
 | `--lidar-port` / `--arduino-port` / `--camera-port` | override device paths |
 
 `main_obstacle.py` adds parking options: `--parking-start` (start parked in the slot),
-`--park-mode {none,perpendicular,...}`, `--park-exit-side {auto,left,right}`. See the
+`--park-mode {none,perpendicular,...}`, `--park-exit-side {auto,left,right}`, and
+`--no-default-color` (don't guess red for a pillar the camera can't resolve). See the
 [processors chapter](../../src/rpi/processors/README.md#parking).
 
 ## 5. Remote access with Tailscale
